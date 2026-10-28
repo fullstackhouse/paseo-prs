@@ -23,6 +23,8 @@ export const BranchSchema = z.object({
   isDefault: z.boolean(),
   ahead: z.number(),
   prs: z.array(PrSchema),
+  /** Open PRs stacked with the branch's: the chain below it and every PR built on top of it. */
+  stack: z.array(PrSchema),
 });
 export type Branch = z.infer<typeof BranchSchema>;
 
@@ -147,17 +149,48 @@ export function visiblePrs(prs: readonly Pr[]): Pr[] {
   return latest ? [latest] : [];
 }
 
-/** A PR related to a workspace: on its branch, linked to it, or both. */
-export type RelatedPr = Pr & { onBranch: boolean; linked: boolean };
+/** An open PR as the stack walk sees it: which branch it merges into which. */
+export interface PrEdge {
+  number: number;
+  head: string;
+  base: string;
+}
 
-/** The workspace branch's PRs ∪ its linked PRs, one row per URL: open first, then by number. */
+/**
+ * Numbers of the open PRs stacked with branch `head`: its PR's base PR, that one's base PR and so on
+ * (down to a branch with no PR, the default branch), plus every PR based on `head` or on one of those.
+ */
+export function stackOf(head: string, open: readonly PrEdge[]): number[] {
+  const byHead = new Map(open.map((edge) => [edge.head, edge]));
+  const found = new Set<number>();
+  for (let edge = byHead.get(byHead.get(head)?.base ?? ""); edge && !found.has(edge.number); edge = byHead.get(edge.base)) {
+    found.add(edge.number);
+  }
+  const seen = new Set([head]);
+  for (const queue = [head]; queue.length; ) {
+    const branch = queue.shift()!;
+    for (const edge of open) {
+      if (edge.base !== branch || seen.has(edge.head)) continue;
+      seen.add(edge.head);
+      found.add(edge.number);
+      queue.push(edge.head);
+    }
+  }
+  found.delete(byHead.get(head)?.number ?? -1);
+  return [...found].sort((a, b) => a - b);
+}
+
+/** A PR related to a workspace: on its branch, in its branch's stack, linked to it, or several. */
+export type RelatedPr = Pr & { onBranch: boolean; stacked: boolean; linked: boolean };
+
+/** The workspace branch's PRs ∪ its stack ∪ its linked PRs, one row per URL: open first, then by number. */
 export function relatedPrs(branch: Branch | undefined, linked: readonly Pr[]): RelatedPr[] {
   const rows = new Map<string, RelatedPr>();
-  for (const pr of visiblePrs(branch?.prs ?? [])) rows.set(pr.url, { ...pr, onBranch: true, linked: false });
-  for (const pr of linked) {
-    const existing = rows.get(pr.url);
-    rows.set(pr.url, existing ? { ...existing, linked: true } : { ...pr, onBranch: false, linked: true });
-  }
+  const add = (pr: Pr, flag: "onBranch" | "stacked" | "linked") =>
+    rows.set(pr.url, { ...(rows.get(pr.url) ?? { ...pr, onBranch: false, stacked: false, linked: false }), [flag]: true });
+  for (const pr of visiblePrs(branch?.prs ?? [])) add(pr, "onBranch");
+  for (const pr of branch?.stack ?? []) add(pr, "stacked");
+  for (const pr of linked) add(pr, "linked");
   const rank = (pr: Pr) => (pr.state === "OPEN" ? 0 : 1);
   return [...rows.values()].sort((a, b) => rank(a) - rank(b) || a.number - b.number || a.url.localeCompare(b.url));
 }

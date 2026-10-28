@@ -1,7 +1,8 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { linkedPrsQuery, parseLinkedPrs } from "./graphql";
-import { parsePrs, parseRemote, prUrl, type Branch, type Pr, type PrRef } from "../shared/prs";
+import { z } from "zod";
+import { parsePrs, parseRemote, prUrl, stackOf, type Branch, type Pr, type PrRef } from "../shared/prs";
 
 const exec = promisify(execFile);
 
@@ -30,14 +31,31 @@ const PR_FIELDS = "number,title,url,state,isDraft,reviewDecision,statusCheckRoll
 
 export async function readBranch(cwd: string): Promise<Branch> {
   const repo = await readRepo(cwd);
-  const none: Branch = { cwd, repo, branch: null, isDefault: false, ahead: 0, prs: [] };
+  const none: Branch = { cwd, repo, branch: null, isDefault: false, ahead: 0, prs: [], stack: [] };
   const branch = await git(cwd, "symbolic-ref", "--quiet", "--short", "HEAD").catch(() => "");
   if (!branch) return none;
   const base = await defaultBranch(cwd);
   if (branch === base) return { ...none, branch, isDefault: true };
   const ahead = Number(await git(cwd, "rev-list", "--count", `origin/${base}..HEAD`).catch(() => "0")) || 0;
-  const prs = parsePrs(await run(cwd, "gh", ["pr", "list", "--head", branch, "--state", "all", "--limit", "20", "--json", PR_FIELDS]));
-  return { cwd, repo, branch, isDefault: false, ahead, prs };
+  const [prs, stack] = await Promise.all([
+    run(cwd, "gh", ["pr", "list", "--head", branch, "--state", "all", "--limit", "20", "--json", PR_FIELDS]).then(parsePrs),
+    repo ? readStack(cwd, repo, branch) : [],
+  ]);
+  return { cwd, repo, branch, isDefault: false, ahead, prs, stack };
+}
+
+const EdgesSchema = z.array(z.object({ number: z.number(), headRefName: z.string(), baseRefName: z.string(), isCrossRepository: z.boolean() }));
+
+/** The open PRs stacked with `head`: one cheap list of the repo's open PRs for the walk, one batch for their states. */
+async function readStack(cwd: string, repo: string, head: string): Promise<Pr[]> {
+  const json = await run(cwd, "gh", ["pr", "list", "--state", "open", "--limit", "500", "--json", "number,headRefName,baseRefName,isCrossRepository"]);
+  // A fork's branch names say nothing about ours.
+  const edges = EdgesSchema.parse(JSON.parse(json))
+    .filter((pr) => !pr.isCrossRepository)
+    .map((pr) => ({ number: pr.number, head: pr.headRefName, base: pr.baseRefName }));
+  const refs = stackOf(head, edges).map((number) => ({ repo, number }));
+  const fetched = await ghPrFetcher(refs);
+  return refs.flatMap((ref) => fetched.get(prUrl(ref)) ?? []);
 }
 
 const TTL_MS = 30_000;
@@ -51,7 +69,7 @@ export class BranchCache {
     if (hit && !force && Date.now() - hit.at < TTL_MS) return hit.value;
     const value = readBranch(cwd).catch((error) => {
       console.error(`[prs] ${cwd}: ${message(error)}`);
-      return { cwd, repo: null, branch: null, isDefault: false, ahead: 0, prs: [] };
+      return { cwd, repo: null, branch: null, isDefault: false, ahead: 0, prs: [], stack: [] };
     });
     this.entries.set(cwd, { at: Date.now(), value });
     return value;

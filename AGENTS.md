@@ -1,11 +1,11 @@
 # paseo-prs
 
-Paseo plugin: one composer pill per agent for the PRs related to its workspace (branch PRs ∪ linked PRs); Create PR when none.
+Paseo plugin: one composer pill per agent for the PRs related to its workspace (branch PRs ∪ their stack ∪ linked PRs); Create PR when none.
 
 ## Layout
 
-- `shared/prs.ts`: Zod schemas, RPCs (`prs.list`, `prs.link`, `prs.unlink`), `parsePrs` (gh JSON → `Pr`), `summarizeChecks`, `parsePrRef` (URL / `o/r#1` / `#1`), `parseRemote`, `relatedPrs` (merge by URL), `pillFor` (pure: branch + linked → one pill spec), `rowDetail`, agent prompts. All logic worth testing lives here or in pure server modules.
-- `server/github.ts`: `readBranch(cwd)` via `git` + `gh pr list --head`; `BranchCache` (per cwd, 30 s TTL); `PrCache` (linked PRs by URL, 30 s TTL, fetches only stale ones). `server/graphql.ts`: one aliased `gh api graphql` query for any number of PRs across repos.
+- `shared/prs.ts`: Zod schemas, RPCs (`prs.list`, `prs.link`, `prs.unlink`), `parsePrs` (gh JSON → `Pr`), `summarizeChecks`, `parsePrRef` (URL / `o/r#1` / `#1`), `parseRemote`, `stackOf` (base/head walk down and up), `relatedPrs` (merge by URL), `pillFor` (pure: branch + linked → one pill spec), `rowDetail`, agent prompts. All logic worth testing lives here or in pure server modules.
+- `server/github.ts`: `readBranch(cwd)` via `git` + `gh pr list --head`, and the stack from one `gh pr list --state open` (number/head/base only) + one GraphQL batch; `BranchCache` (per cwd, 30 s TTL); `PrCache` (linked PRs by URL, 30 s TTL, fetches only stale ones). `server/graphql.ts`: one aliased `gh api graphql` query for any number of PRs across repos.
 - `server/store.ts`: `LinkStore`, `links.json` in `~/.paseo/plugin-data/prs` (`PASEO_PRS_DIR` overrides). `server/links.ts`: link/unlink/list shared by RPCs and MCP; links only PRs GitHub returns, under GitHub's repo spelling.
 - `server/bridge.ts` + `server/listener.ts` (copied from paseo-asks): stdio MCP script → localhost HTTP. `server/tools.ts`: `prs_link`/`prs_unlink`/`prs_list`, `pickCaller` (Codex has no `PASEO_AGENT_ID`), permission matcher.
 - `client/pills.ts`: subscribes to agents, one pill per agent (`update` only the face; a new `behavior` closes an open popover). Forced refresh when an agent goes running → idle; 60 s poll otherwise. `client/PrsPopover.tsx`: the list, link field, unlink ×, prompt buttons (disabled while the agent runs; `send()` interrupts a turn). `index.client.tsx`: `/link-pr`.

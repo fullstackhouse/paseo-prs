@@ -98,7 +98,7 @@ function PrRow(props: {
           </Text>
           <Text style={[styles.detail, { color: tone }]} numberOfLines={1}>
             {rowDetail(pr)}
-            {pr.onBranch ? " · this branch" : ""}
+            {pr.onBranch ? " · this branch" : pr.stacked ? " · stack" : ""}
           </Text>
         </View>
       </Pressable>

@@ -3,9 +3,10 @@ PRs shows the pull requests related to a workspace as a pill in each agent's com
 ## What counts as related
 
 - The PRs on the workspace's branch: every open one, or with none open, the latest merged or closed one.
-- PRs linked to the workspace, from any repository. An agent running a stack of 29 PRs links each one it opens; they all show in one place.
+- The open PRs stacked with the branch's, found on their own: the PR it is based on, that one's base PR and so on down to the default branch, plus every PR built on top of it. A workspace anywhere in a 29-PR stack shows all 29 without linking anything.
+- PRs linked to the workspace, from any repository, for anything else that belongs with the work.
 
-Link a PR from the pill's popover (a PR URL, `owner/repo#123`, or `#123` in the workspace's repository), with `/link-pr <url or #123>` in the composer, or let the agent do it: agents get `prs_link`, `prs_unlink` and `prs_list` tools, allowed without a permission prompt. Unlink with the × on a row. PRs on the branch need no linking.
+Link a PR from the pill's popover (a PR URL, `owner/repo#123`, or `#123` in the workspace's repository), with `/link-pr <url or #123>` in the composer, or let the agent do it: agents get `prs_link`, `prs_unlink` and `prs_list` tools, allowed without a permission prompt. Unlink with the × on a row. PRs on the branch or in its stack need no linking.
 
 ## What the pill shows
 

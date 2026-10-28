@@ -5,6 +5,7 @@ import {
   parseRemote,
   pillFor,
   relatedPrs,
+  stackOf,
   rowDetail,
   summarizeChecks,
   type Branch,
@@ -29,6 +30,7 @@ const branch = (overrides: Partial<Branch> = {}): Branch => ({
   isDefault: false,
   ahead: 2,
   prs: [],
+  stack: [],
   ...overrides,
 });
 const label = (b: Branch | undefined, linked: Pr[] = []) => pillFor(b, linked)?.label ?? null;
@@ -116,6 +118,41 @@ describe("relatedPrs", () => {
 
   it("works without a branch", () => {
     expect(relatedPrs(undefined, [pr({ number: 3 })]).map((row) => row.number)).toEqual([3]);
+  });
+  it("adds the branch's stack, merging a stacked PR that is also linked", () => {
+    const rows = relatedPrs(branch({ prs: [pr({ number: 2 })], stack: [pr({ number: 1 }), pr({ number: 3 })] }), [pr({ number: 3 })]);
+    expect(rows.map((row) => [row.number, row.onBranch, row.stacked, row.linked])).toEqual([
+      [1, false, true, false],
+      [2, true, false, false],
+      [3, false, true, true],
+    ]);
+  });
+});
+
+describe("stackOf", () => {
+  // main ← a (#1) ← b (#2) ← c (#3), c ← d (#4), b ← e (#5); f (#6) is unrelated.
+  const edges = [
+    { number: 1, head: "a", base: "main" },
+    { number: 2, head: "b", base: "a" },
+    { number: 3, head: "c", base: "b" },
+    { number: 4, head: "d", base: "c" },
+    { number: 5, head: "e", base: "b" },
+    { number: 6, head: "f", base: "main" },
+  ];
+
+  it("walks down to the default branch and up through every PR built on the branch", () => {
+    expect(stackOf("c", edges)).toEqual([1, 2, 4]);
+    expect(stackOf("b", edges)).toEqual([1, 3, 4, 5]);
+    expect(stackOf("a", edges)).toEqual([2, 3, 4, 5]);
+  });
+
+  it("is empty for a lone PR and finds PRs built on a branch that has none yet", () => {
+    expect(stackOf("f", edges)).toEqual([]);
+    expect(stackOf("g", [...edges, { number: 7, head: "h", base: "g" }])).toEqual([7]);
+  });
+
+  it("survives a cycle", () => {
+    expect(stackOf("x", [{ number: 1, head: "x", base: "y" }, { number: 2, head: "y", base: "x" }])).toEqual([2]);
   });
 });
 
