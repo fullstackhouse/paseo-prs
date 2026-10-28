@@ -55,6 +55,23 @@ export const unlinkPrs = defineRpc({
   output: LinkResultSchema,
 });
 
+/** Labels on an agent forked into a PR workspace: its source agent, and the PR it focuses on. */
+export const FORKED_FROM_LABEL = "prs.forkedFrom";
+export const PR_LABEL = "prs.pr";
+
+const ForkInputSchema = z.object({ agentId: z.string(), prUrl: z.string() });
+export type ForkInput = z.infer<typeof ForkInputSchema>;
+const ForkResultSchema = z.object({ agentId: z.string(), workspaceId: z.string().nullable() });
+export type ForkResult = z.infer<typeof ForkResultSchema>;
+
+/** Forks an agent's chat into a new workspace with the PR checked out. */
+export const forkPr = defineRpc({ name: "prs.fork", input: ForkInputSchema, output: ForkResultSchema });
+
+export const forkPrompt = (pr: Pick<Pr, "number" | "url">, sourceTitle: string | null) =>
+  `Focus only on PR #${pr.number} (${pr.url}). This workspace has it checked out. ` +
+  `You were forked from ${sourceTitle ? `the agent "${sourceTitle}"` : "another agent"}, which works on several related PRs; ` +
+  `its chat history and the PR are attached. Read them, then say what state the PR is in and wait for instructions.`;
+
 export const CREATE_PR_PROMPT = "Open a pull request for this branch.";
 export const fixChecksPrompt = (pr: Pr) => `PR #${pr.number} (${pr.url}) has failing checks. Fix them and push.`;
 export const addressReviewPrompt = (pr: Pr) =>
@@ -258,4 +275,40 @@ export function pillFor(branch: Branch | undefined, linked: readonly Pr[]): Pill
   // No PR yet: offer one only for a feature branch with commits to propose.
   if (!branch?.branch || branch.isDefault || branch.ahead === 0) return null;
   return { kind: "create", label: "Create PR", icon: "GitPullRequestCreate" };
+}
+
+/** An agent as the PR row lookup sees it. */
+export interface AgentRef {
+  id: string;
+  workspaceId: string;
+  cwd: string;
+  labels: Readonly<Record<string, string>>;
+}
+
+/** What a PR row offers besides opening GitHub: fork the chat into a new workspace, or open the one already on it. */
+export type RowTarget = { kind: "fork" } | { kind: "open"; agentId: string };
+
+/**
+ * A live agent in another workspace that is on this PR: one forked for it, else one whose branch has
+ * it open. The PR row offers Open instead of forking a duplicate.
+ */
+export function prAgentFor(
+  prUrl: string,
+  agents: readonly AgentRef[],
+  branches: ReadonlyMap<string, Branch>,
+  exceptWorkspaceId: string,
+): AgentRef | null {
+  const url = prUrl.toLowerCase();
+  const others = agents.filter((agent) => agent.workspaceId !== exceptWorkspaceId);
+  return (
+    others.find((agent) => agent.labels[PR_LABEL]?.toLowerCase() === url) ??
+    others.find((agent) => branches.get(agent.cwd)?.prs.some((pr) => pr.state === "OPEN" && pr.url.toLowerCase() === url)) ??
+    null
+  );
+}
+
+/** A PR can be checked out into a new worktree only from a checkout of its own repo, and only while open. */
+export function canFork(pr: RelatedPr, workspaceRepo: string | null): boolean {
+  if (pr.onBranch || pr.state !== "OPEN" || !workspaceRepo) return false;
+  return parsePrRef(pr.url, null)?.repo.toLowerCase() === workspaceRepo.toLowerCase();
 }

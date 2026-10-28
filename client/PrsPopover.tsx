@@ -3,11 +3,13 @@ import { openExternalUrl, type PluginButtonContentProps } from "@getpaseo/plugin
 import { Icon, TextInput } from "@getpaseo/plugin/client/react-native";
 import { useMemo, useState, useSyncExternalStore, type ComponentType } from "react";
 import { Pressable, Text, View } from "react-native";
-import { addressReviewPrompt, CREATE_PR_PROMPT, fixChecksPrompt, prIcon, rowDetail, type LinkResult, type RelatedPr } from "../shared/prs";
+import { addressReviewPrompt, CREATE_PR_PROMPT, fixChecksPrompt, prIcon, rowDetail, type LinkResult, type RelatedPr, type RowTarget } from "../shared/prs";
 
 /** What one agent's popover shows. */
 export interface AgentPrs {
   prs: RelatedPr[];
+  /** By PR URL; absent when the row can neither fork nor open (this branch's PR, another repo, closed). */
+  targets: Record<string, RowTarget>;
   canCreate: boolean;
   running: boolean;
 }
@@ -20,6 +22,9 @@ export interface PrsStore {
   send(agentId: string, text: string): Promise<void>;
   link(agentId: string, refs: string[]): Promise<LinkResult>;
   unlink(agentId: string, url: string): Promise<void>;
+  /** Forks the agent's chat into a new workspace on the PR, then opens it. */
+  fork(agentId: string, prUrl: string): Promise<void>;
+  open(agentId: string): Promise<void>;
 }
 
 type Styles = ReturnType<typeof makeStyles>;
@@ -30,6 +35,7 @@ export function makePopover(store: PrsStore): ComponentType<PluginButtonContentP
     const view = useSyncExternalStore(store.subscribe, () => (agentId ? store.get(agentId) : undefined));
     const styles = useMemo(() => makeStyles(props.theme, props.layout.compact), [props.theme, props.layout.compact]);
     const [note, setNote] = useState<{ text: string; danger: boolean } | null>(null);
+    const [forking, setForking] = useState<string | null>(null);
     if (!agentId || !view) return <Text style={styles.muted}>No pull requests here.</Text>;
 
     const act = (task: () => Promise<unknown>) => {
@@ -55,6 +61,25 @@ export function makePopover(store: PrsStore): ComponentType<PluginButtonContentP
             running={view.running}
             prompt={prompt}
             unlink={() => act(() => store.unlink(agentId, pr.url))}
+            target={view.targets[pr.url]}
+            forking={forking}
+            fork={() =>
+              act(async () => {
+                setForking(pr.url);
+                try {
+                  await store.fork(agentId, pr.url);
+                  props.close();
+                } finally {
+                  setForking(null);
+                }
+              })
+            }
+            open={(target) =>
+              act(async () => {
+                props.close();
+                await store.open(target);
+              })
+            }
           />
         ))}
         {view.canCreate && (
@@ -72,8 +97,13 @@ function PrRow(props: {
   running: boolean;
   prompt(text: string): void;
   unlink(): void;
+  target: RowTarget | undefined;
+  /** URL of the PR being forked, if any; one fork at a time. */
+  forking: string | null;
+  fork(): void;
+  open(agentId: string): void;
 }) {
-  const { pr, styles, theme } = props;
+  const { pr, styles, theme, target } = props;
   const { colors } = theme;
   const tone =
     pr.state === "UNKNOWN" || pr.state === "CLOSED" || pr.checks === "failing" || pr.review === "changes_requested"
@@ -107,6 +137,15 @@ function PrRow(props: {
       )}
       {open && pr.review === "changes_requested" && (
         <Button styles={styles} label="Address" disabled={props.running} onPress={() => props.prompt(addressReviewPrompt(pr))} />
+      )}
+      {target?.kind === "open" && <Button styles={styles} label="Open" onPress={() => props.open(target.agentId)} />}
+      {target?.kind === "fork" && (
+        <Button
+          styles={styles}
+          label={props.forking === pr.url ? "Forking…" : "Fork chat"}
+          disabled={props.forking !== null}
+          onPress={props.fork}
+        />
       )}
       {pr.linked && (
         <Pressable accessibilityRole="button" accessibilityLabel={`Unlink PR ${pr.number}`} onPress={props.unlink} style={styles.icon} hitSlop={6}>

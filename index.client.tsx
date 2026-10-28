@@ -1,4 +1,5 @@
 import type { PluginClientContext } from "@getpaseo/plugin/client";
+import { OPEN_AGENT_SCREEN, OpenAgentScreen } from "./client/OpenAgentScreen";
 import { contributePills } from "./client/pills";
 import { linkPrs } from "./shared/prs";
 
@@ -16,5 +17,6 @@ export default function contribute(client: PluginClientContext) {
       if (result.errors.length) throw new Error(result.errors.join("\n"));
     },
   });
-  return contributePills(client);
+  client.addScreen({ id: OPEN_AGENT_SCREEN, title: "Opening agent", Component: OpenAgentScreen });
+  return contributePills(client, (agentId) => client.openScreen({ screenId: OPEN_AGENT_SCREEN, params: { agentId } }));
 }

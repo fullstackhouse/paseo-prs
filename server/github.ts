@@ -37,9 +37,14 @@ export async function readBranch(cwd: string): Promise<Branch> {
   const base = await defaultBranch(cwd);
   if (branch === base) return { ...none, branch, isDefault: true };
   const ahead = Number(await git(cwd, "rev-list", "--count", `origin/${base}..HEAD`).catch(() => "0")) || 0;
+  // A worktree's local branch can differ from the PR's head (`feat/x-1` tracking `origin/feat/x`, as checkout-pr does).
+  const upstream = await git(cwd, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}").catch(() => "");
+  const tracked = upstream.startsWith("origin/") ? upstream.slice("origin/".length) : "";
+  // A new branch made from origin/main tracks it; that is not its PR head.
+  const head = tracked && tracked !== base ? tracked : branch;
   const [prs, stack] = await Promise.all([
-    run(cwd, "gh", ["pr", "list", "--head", branch, "--state", "all", "--limit", "20", "--json", PR_FIELDS]).then(parsePrs),
-    repo ? readStack(cwd, repo, branch) : [],
+    run(cwd, "gh", ["pr", "list", "--head", head, "--state", "all", "--limit", "20", "--json", PR_FIELDS]).then(parsePrs),
+    repo ? readStack(cwd, repo, head) : [],
   ]);
   return { cwd, repo, branch, isDefault: false, ahead, prs, stack };
 }
@@ -56,6 +61,21 @@ async function readStack(cwd: string, repo: string, head: string): Promise<Pr[]>
   const refs = stackOf(head, edges).map((number) => ({ repo, number }));
   const fetched = await ghPrFetcher(refs);
   return refs.flatMap((ref) => fetched.get(prUrl(ref)) ?? []);
+}
+
+export interface PrDetails {
+  number: number;
+  title: string;
+  url: string;
+  body: string | null;
+  baseRefName: string | null;
+  headRefName: string | null;
+}
+
+/** What a `github_pr` attachment carries, from `gh pr view`. */
+export async function readPrDetails(cwd: string, url: string): Promise<PrDetails> {
+  const json = JSON.parse(await run(cwd, "gh", ["pr", "view", url, "--json", "number,title,url,body,baseRefName,headRefName"]));
+  return { body: null, baseRefName: null, headRefName: null, ...json };
 }
 
 const TTL_MS = 30_000;
