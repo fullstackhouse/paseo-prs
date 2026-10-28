@@ -309,6 +309,6 @@ export function prAgentFor(
 
 /** A PR can be checked out into a new worktree only from a checkout of its own repo, and only while open. */
 export function canFork(pr: RelatedPr, workspaceRepo: string | null): boolean {
-  if (pr.onBranch || pr.state !== "OPEN" || !workspaceRepo) return false;
+  if (pr.state !== "OPEN" || !workspaceRepo) return false;
   return parsePrRef(pr.url, null)?.repo.toLowerCase() === workspaceRepo.toLowerCase();
 }

@@ -53,7 +53,7 @@ describe("canFork", () => {
     expect(canFork(row(), "x/y")).toBe(false);
     expect(canFork(row(), null)).toBe(false);
     expect(canFork(row({ state: "MERGED" }), "o/r")).toBe(false);
-    expect(canFork(row({ onBranch: true }), "o/r")).toBe(false);
+    expect(canFork(row({ onBranch: true }), "o/r")).toBe(true);
   });
 });
 

@@ -98,7 +98,7 @@ export function contributePills(client: PluginClientContext, openAgent: (agentId
     const others = [...agents.values()];
     const targets: Record<string, RowTarget> = {};
     for (const pr of prs) {
-      const existing = pr.onBranch ? null : prAgentFor(pr.url, others, branches, agent.workspaceId);
+      const existing = prAgentFor(pr.url, others, branches, agent.workspaceId);
       if (existing) targets[pr.url] = { kind: "open", agentId: existing.id };
       else if (canFork(pr, repo)) targets[pr.url] = { kind: "fork" };
     }
