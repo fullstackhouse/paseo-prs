@@ -1,7 +1,7 @@
 {
   "id": "paseo-prs",
   "name": "PRs",
-  "description": "A composer pill per pull request on the agent's branch, with check and review status, or a Create PR button when there is none.",
+  "description": "A composer pill per agent with the pull requests related to its workspace (its branch's plus linked ones), with check and review status, or a Create PR button when there is none.",
   "requirements": {
     "paseo": ">=0.12.0"
   }

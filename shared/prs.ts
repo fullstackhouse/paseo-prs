@@ -5,7 +5,8 @@ export const PrSchema = z.object({
   number: z.number(),
   title: z.string(),
   url: z.string(),
-  state: z.enum(["OPEN", "MERGED", "CLOSED"]),
+  // UNKNOWN: a linked PR GitHub did not return (deleted, renamed repo, no access).
+  state: z.enum(["OPEN", "MERGED", "CLOSED", "UNKNOWN"]),
   draft: z.boolean(),
   checks: z.enum(["passing", "failing", "pending", "none"]),
   failing: z.number(),
@@ -16,6 +17,8 @@ export type Pr = z.infer<typeof PrSchema>;
 /** What a working directory's branch has on GitHub. `branch` is null outside a git checkout or on a detached HEAD. */
 export const BranchSchema = z.object({
   cwd: z.string(),
+  /** `owner/name` of origin on GitHub, null when it is not a GitHub remote. */
+  repo: z.string().nullable(),
   branch: z.string().nullable(),
   isDefault: z.boolean(),
   ahead: z.number(),
@@ -23,23 +26,41 @@ export const BranchSchema = z.object({
 });
 export type Branch = z.infer<typeof BranchSchema>;
 
-export const listBranches = defineRpc({
+export const WorkspaceLinksSchema = z.object({ workspaceId: z.string(), prs: z.array(PrSchema) });
+export type WorkspaceLinks = z.infer<typeof WorkspaceLinksSchema>;
+
+const WorkspaceRefSchema = z.object({ workspaceId: z.string(), cwd: z.string() });
+
+export const listPrs = defineRpc({
   name: "prs.list",
-  input: z.object({ cwds: z.array(z.string()), force: z.boolean().optional() }),
-  output: z.object({ branches: z.array(BranchSchema) }),
+  input: z.object({ workspaces: z.array(WorkspaceRefSchema), force: z.boolean().optional() }),
+  output: z.object({ branches: z.array(BranchSchema), links: z.array(WorkspaceLinksSchema) }),
 });
 
-/** Above this many PRs the agent gets one "N PRs" pill instead of one pill each. */
-export const MAX_PILLS = 3;
+const LinkResultSchema = z.object({ linked: z.array(z.string()), errors: z.array(z.string()) });
+export type LinkResult = z.infer<typeof LinkResultSchema>;
+
+/** `refs`: PR URLs, `owner/name#123`, or `#123` / `123` in the workspace's repo. */
+export const linkPrs = defineRpc({
+  name: "prs.link",
+  input: WorkspaceRefSchema.extend({ refs: z.array(z.string()) }),
+  output: LinkResultSchema,
+});
+
+export const unlinkPrs = defineRpc({
+  name: "prs.unlink",
+  input: WorkspaceRefSchema.extend({ refs: z.array(z.string()) }),
+  output: LinkResultSchema,
+});
 
 export const CREATE_PR_PROMPT = "Open a pull request for this branch.";
 export const fixChecksPrompt = (pr: Pr) => `PR #${pr.number} (${pr.url}) has failing checks. Fix them and push.`;
 export const addressReviewPrompt = (pr: Pr) =>
   `PR #${pr.number} (${pr.url}) has changes requested. Address the review comments and push.`;
 
-// gh's statusCheckRollup mixes CheckRun (status + conclusion) and StatusContext (state) entries.
+// gh's statusCheckRollup mixes CheckRun (status + conclusion) and StatusContext (state) entries; GraphQL sends nulls.
 const RollupSchema = z.array(
-  z.object({ status: z.string().optional(), conclusion: z.string().optional(), state: z.string().optional() }).passthrough(),
+  z.object({ status: z.string().nullish(), conclusion: z.string().nullish(), state: z.string().nullish() }).passthrough(),
 );
 const FAILED = new Set(["FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE"]);
 const PENDING = new Set(["PENDING", "EXPECTED", "QUEUED", "IN_PROGRESS", "WAITING", "REQUESTED"]);
@@ -67,6 +88,7 @@ const GhPrSchema = z.object({
   reviewDecision: z.string().nullable().optional(),
   statusCheckRollup: z.unknown().optional(),
 });
+type GhPr = z.infer<typeof GhPrSchema>;
 
 const REVIEWS: Record<string, Pr["review"]> = {
   APPROVED: "approved",
@@ -74,23 +96,50 @@ const REVIEWS: Record<string, Pr["review"]> = {
   REVIEW_REQUIRED: "review_required",
 };
 
+const toPr = (pr: GhPr): Pr => ({
+  number: pr.number,
+  title: pr.title,
+  url: pr.url,
+  state: pr.state,
+  draft: pr.isDraft,
+  review: REVIEWS[pr.reviewDecision ?? ""] ?? "none",
+  ...summarizeChecks(pr.statusCheckRollup),
+});
+
 /** Parses `gh pr list --json number,title,url,state,isDraft,reviewDecision,statusCheckRollup`. */
 export function parsePrs(json: string): Pr[] {
-  return z
-    .array(GhPrSchema)
-    .parse(JSON.parse(json))
-    .map((pr) => ({
-      number: pr.number,
-      title: pr.title,
-      url: pr.url,
-      state: pr.state,
-      draft: pr.isDraft,
-      review: REVIEWS[pr.reviewDecision ?? ""] ?? "none",
-      ...summarizeChecks(pr.statusCheckRollup),
-    }));
+  return z.array(GhPrSchema).parse(JSON.parse(json)).map(toPr);
 }
 
-/** The PRs worth showing: every open one; with none open, the latest merged or closed one. */
+/** A PR on GitHub, by repository and number. */
+export interface PrRef {
+  repo: string;
+  number: number;
+}
+
+export const prUrl = (ref: PrRef) => `https://github.com/${ref.repo}/pull/${ref.number}`;
+
+/**
+ * `https://github.com/o/r/pull/12` (any suffix), `o/r#12`, or `#12` / `12` in `defaultRepo`.
+ * Null when the input is none of these, or is a bare number with no repo to resolve it in.
+ */
+export function parsePrRef(input: string, defaultRepo: string | null): PrRef | null {
+  const text = input.trim();
+  const url = /^(?:https?:\/\/)?(?:www\.)?github\.com\/([\w.-]+\/[\w.-]+)\/pull\/(\d+)(?:[/?#].*)?$/i.exec(text);
+  const short = /^([\w.-]+\/[\w.-]+)#(\d+)$/.exec(text);
+  const bare = /^#?(\d+)$/.exec(text);
+  const [repo, number] = url ? [url[1]!, url[2]!] : short ? [short[1]!, short[2]!] : bare && defaultRepo ? [defaultRepo, bare[1]!] : [];
+  if (!repo || !number || Number(number) <= 0) return null;
+  return { repo, number: Number(number) };
+}
+
+/** `owner/name` from a GitHub remote URL (https, ssh or scp-like); null for other hosts. */
+export function parseRemote(remote: string): string | null {
+  const match = /github\.com[:/]([\w.-]+)\/([\w.-]+?)(?:\.git)?\/?$/i.exec(remote.trim());
+  return match ? `${match[1]}/${match[2]}` : null;
+}
+
+/** The branch PRs worth showing: every open one; with none open, the latest merged or closed one. */
 export function visiblePrs(prs: readonly Pr[]): Pr[] {
   const open = prs.filter((pr) => pr.state === "OPEN").sort((a, b) => a.number - b.number);
   if (open.length) return open;
@@ -98,8 +147,24 @@ export function visiblePrs(prs: readonly Pr[]): Pr[] {
   return latest ? [latest] : [];
 }
 
+/** A PR related to a workspace: on its branch, linked to it, or both. */
+export type RelatedPr = Pr & { onBranch: boolean; linked: boolean };
+
+/** The workspace branch's PRs ∪ its linked PRs, one row per URL: open first, then by number. */
+export function relatedPrs(branch: Branch | undefined, linked: readonly Pr[]): RelatedPr[] {
+  const rows = new Map<string, RelatedPr>();
+  for (const pr of visiblePrs(branch?.prs ?? [])) rows.set(pr.url, { ...pr, onBranch: true, linked: false });
+  for (const pr of linked) {
+    const existing = rows.get(pr.url);
+    rows.set(pr.url, existing ? { ...existing, linked: true } : { ...pr, onBranch: false, linked: true });
+  }
+  const rank = (pr: Pr) => (pr.state === "OPEN" ? 0 : 1);
+  return [...rows.values()].sort((a, b) => rank(a) - rank(b) || a.number - b.number || a.url.localeCompare(b.url));
+}
+
 /** A short status after the PR number: the thing that needs attention first. */
 export function prStatus(pr: Pr): string {
+  if (pr.state === "UNKNOWN") return "unavailable";
   if (pr.state === "MERGED") return "merged";
   if (pr.state === "CLOSED") return "closed";
   if (pr.checks === "failing") return `${pr.failing} failing`;
@@ -112,6 +177,7 @@ export function prStatus(pr: Pr): string {
 }
 
 export function prIcon(pr: Pr): string {
+  if (pr.state === "UNKNOWN") return "CircleHelp";
   if (pr.state === "MERGED") return "GitMerge";
   if (pr.state === "CLOSED") return "GitPullRequestClosed";
   if (pr.checks === "failing") return "CircleX";
@@ -120,31 +186,43 @@ export function prIcon(pr: Pr): string {
   return "GitPullRequest";
 }
 
-/** The pills an agent gets for its branch, as data; the client turns them into buttons. */
-export type PillSpec =
-  | { key: string; kind: "pr"; pr: Pr; label: string; icon: string }
-  | { key: "many"; kind: "many"; prs: Pr[]; label: string; icon: string }
-  | { key: "create"; kind: "create"; label: string; icon: string };
+const ROW_CHECKS: Record<Pr["checks"], string> = { passing: "checks pass", failing: "", pending: "checks running", none: "" };
+const ROW_REVIEWS: Record<Pr["review"], string> = {
+  approved: "approved",
+  changes_requested: "changes requested",
+  review_required: "review required",
+  none: "",
+};
 
-export function pillsFor(branch: Branch | undefined): PillSpec[] {
-  if (!branch?.branch) return [];
-  const prs = visiblePrs(branch.prs);
-  if (prs.length > MAX_PILLS) {
-    const failing = prs.filter((pr) => pr.checks === "failing").length;
-    return [
-      {
-        key: "many",
-        kind: "many",
-        prs,
-        label: `${prs.length} PRs${failing ? ` · ${failing} failing` : ""}`,
-        icon: failing ? "CircleX" : "GitPullRequest",
-      },
-    ];
+/** `draft · 2 failing · changes requested`: state, checks and review, the parts that apply. */
+export function rowDetail(pr: Pr): string {
+  if (pr.state === "UNKNOWN") return "not found on GitHub";
+  if (pr.state !== "OPEN") return pr.state.toLowerCase();
+  const checks = pr.checks === "failing" ? `${pr.failing} failing` : ROW_CHECKS[pr.checks];
+  return [pr.draft ? "draft" : "", checks, ROW_REVIEWS[pr.review]].filter(Boolean).join(" · ") || "open";
+}
+
+/** The one pill an agent gets, as data; the client turns it into a button. */
+export type PillSpec =
+  | { kind: "prs"; prs: RelatedPr[]; label: string; icon: string }
+  | { kind: "create"; label: string; icon: string };
+
+export function pillFor(branch: Branch | undefined, linked: readonly Pr[]): PillSpec | null {
+  const prs = relatedPrs(branch, linked);
+  if (prs.length === 1) {
+    const pr = prs[0]!;
+    return { kind: "prs", prs, label: `#${pr.number} · ${prStatus(pr)}`, icon: prIcon(pr) };
   }
-  if (prs.length) {
-    return prs.map((pr) => ({ key: `pr-${pr.number}`, kind: "pr", pr, label: `#${pr.number} · ${prStatus(pr)}`, icon: prIcon(pr) }));
+  if (prs.length > 1) {
+    const failing = prs.filter((pr) => pr.state === "OPEN" && pr.checks === "failing").length;
+    return {
+      kind: "prs",
+      prs,
+      label: `PRs · ${prs.length}${failing ? ` · ${failing} failing` : ""}`,
+      icon: failing ? "CircleX" : "GitPullRequest",
+    };
   }
   // No PR yet: offer one only for a feature branch with commits to propose.
-  if (branch.isDefault || branch.ahead === 0) return [];
-  return [{ key: "create", kind: "create", label: "Create PR", icon: "GitPullRequestCreate" }];
+  if (!branch?.branch || branch.isDefault || branch.ahead === 0) return null;
+  return { kind: "create", label: "Create PR", icon: "GitPullRequestCreate" };
 }
