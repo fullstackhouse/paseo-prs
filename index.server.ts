@@ -1,12 +1,13 @@
 import type { PaseoApi } from "@getpaseo/client";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { installBridge } from "./server/bridge";
+import { forkIntoPr } from "./server/fork";
 import { BranchCache, PrCache } from "./server/github";
 import { Links, type WorkspaceRef } from "./server/links";
 import { listen } from "./server/listener";
 import { dataDir, LinkStore } from "./server/store";
 import { callTool, INSTRUCTIONS, isPrsPermission, MCP_SERVER, pickCaller, PREAPPROVED, TOOLS } from "./server/tools";
-import { linkPrs, listPrs, unlinkPrs } from "./shared/prs";
+import { forkPr, linkPrs, listPrs, unlinkPrs } from "./shared/prs";
 
 export default function contribute(server: PluginServerContext) {
   const dir = dataDir();
@@ -63,6 +64,11 @@ export default function contribute(server: PluginServerContext) {
   server.handle(unlinkPrs, ({ refs, ...workspace }, { paseo: api }) => {
     capture(api);
     return links.unlink(workspace, refs);
+  });
+
+  server.handle(forkPr, (input, { paseo: api }) => {
+    capture(api);
+    return forkIntoPr(api, input);
   });
 
   const listening = listen(dir, {
