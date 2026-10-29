@@ -4,5 +4,6 @@
   "description": "A composer pill per agent with the pull requests related to its workspace (its branch's, the PRs stacked with it, and linked ones), with check and review status, or a Create PR button when there is none.",
   "requirements": {
     "paseo": ">=0.12.0"
-  }
+  },
+  "build": [["npm", "ci"]]
 }
