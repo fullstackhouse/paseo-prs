@@ -2,12 +2,13 @@ import type { PaseoApi } from "@getpaseo/client";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { installBridge } from "./server/bridge";
 import { forkIntoPr } from "./server/fork";
-import { BranchCache, PrCache } from "./server/github";
+import { BranchCache, PrCache, readPrDetails } from "./server/github";
 import { Links, type WorkspaceRef } from "./server/links";
 import { listen } from "./server/listener";
+import { Reports, ReportStore } from "./server/reports";
 import { dataDir, LinkStore } from "./server/store";
 import { callTool, INSTRUCTIONS, isPrsPermission, MCP_SERVER, pickCaller, PREAPPROVED, TOOLS } from "./server/tools";
-import { forkPr, linkPrs, listPrs, unlinkPrs } from "./shared/prs";
+import { forkPr, linkPrs, listPrs, listReports, reportPr, unlinkPrs } from "./shared/prs";
 
 export default function contribute(server: PluginServerContext) {
   const dir = dataDir();
@@ -19,6 +20,7 @@ export default function contribute(server: PluginServerContext) {
   const capture = (api: PaseoApi) => {
     paseo ??= api;
   };
+  const reports = new Reports(() => paseo, new ReportStore(dir), readPrDetails);
 
   /** The workspace of the agent behind an MCP call: by PASEO_AGENT_ID, else (Codex) the one mid-turn in its cwd. */
   const callerOf = async (agentId: string | null, cwd: string | null): Promise<WorkspaceRef | null> => {
@@ -50,6 +52,12 @@ export default function contribute(server: PluginServerContext) {
     await api.agents.ref(agent.id).respondToPermission({ requestId: request.id, response: { behavior: "allow" } });
   });
 
+  // Only the turn the Done button started is forwarded; Reports ignores every other turn.
+  server.on("agent.turn_ended", ({ agent, outcome }, { paseo: api }) => {
+    capture(api);
+    return reports.turnEnded(agent, outcome);
+  });
+
   server.handle(listPrs, async ({ workspaces, force }, { paseo: api }) => {
     capture(api);
     const cwds = [...new Set(workspaces.map((workspace) => workspace.cwd))];
@@ -69,6 +77,15 @@ export default function contribute(server: PluginServerContext) {
   server.handle(forkPr, (input, { paseo: api }) => {
     capture(api);
     return forkIntoPr(api, input);
+  });
+
+  server.handle(reportPr, (input, { paseo: api }) => {
+    capture(api);
+    return reports.start(api, input);
+  });
+  server.handle(listReports, ({ agentIds }, { paseo: api }) => {
+    capture(api);
+    return { reports: reports.states(agentIds) };
   });
 
   const listening = listen(dir, {

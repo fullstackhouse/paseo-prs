@@ -20,6 +20,14 @@ Pressing the pill opens a list: number, title, checks and review state per PR, o
 
 **Fork chat** on a row creates a new workspace with that PR checked out and opens it. Its agent uses the same provider, model, mode and thinking as the current one, gets the PR and the current chat's history attached, and starts with "Focus only on PR #N". It is not a subagent of the current one; it carries a `prs.forkedFrom` label pointing back. When a live agent elsewhere is already on that PR (forked earlier, or on its branch), the row shows **Open** instead. Fork is offered for open PRs from the workspace's own repository.
 
+## Report back to the main chat
+
+A forked agent gets a second pill, **Report to main**. Its popover has an optional note, a checkbox to archive the fork's workspace afterwards, **Done, report to main chat**, and **Go to main chat**.
+
+Done asks the fork agent for a final report: what was decided, the commits it pushed, what is left, and what the main agent must do next. When that turn ends, the plugin sends the reply to the main agent as `[prs] #170 (title): …`, a message from the fork that starts a turn there, or joins the running one. Pressing it again sends `[prs] #170 (title) update: …`.
+
+Reports go out only when you press the button. The fork agent has no tool to report on its own, and its other turns are never forwarded. When the PR is merged or closed while the fork is open, the pill changes to **PR merged — report & finish?**, and still waits for you. A main chat that is archived or gone shows an error before the fork spends a turn on the report. A canceled or failed report turn sends nothing.
+
 ## Setup
 
 Needs `git` and the GitHub CLI (`gh`), signed in, on the daemon machine. Only GitHub is supported.

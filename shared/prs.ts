@@ -312,3 +312,52 @@ export function canFork(pr: RelatedPr, workspaceRepo: string | null): boolean {
   if (pr.state !== "OPEN" || !workspaceRepo) return false;
   return parsePrRef(pr.url, null)?.repo.toLowerCase() === workspaceRepo.toLowerCase();
 }
+
+/** A fork's report to its main chat: written by the fork agent only after the human clicks Done. */
+export const ReportStateSchema = z.object({
+  /** Reports sent so far; the next one after the first is an update. */
+  sent: z.number(),
+  state: z.enum(["writing", "sent", "failed"]),
+  error: z.string().optional(),
+  at: z.string(),
+});
+export type ReportState = z.infer<typeof ReportStateSchema>;
+
+const ReportInputSchema = z.object({ agentId: z.string(), note: z.string().optional(), archive: z.boolean().optional() });
+export type ReportInput = z.infer<typeof ReportInputSchema>;
+
+/** Asks a fork agent to write its final report; the plugin forwards the reply to the main chat. */
+export const reportPr = defineRpc({ name: "prs.report", input: ReportInputSchema, output: ReportStateSchema });
+
+/** Report states of the given agents, those that have one. */
+export const listReports = defineRpc({
+  name: "prs.reports",
+  input: z.object({ agentIds: z.array(z.string()) }),
+  output: z.object({ reports: z.record(z.string(), ReportStateSchema) }),
+});
+
+export const reportPrompt = (pr: Pick<Pr, "number" | "url">, note: string | undefined, update: boolean) =>
+  [
+    `The human is done with PR #${pr.number} (${pr.url}) here${update ? " again, after an earlier report" : ""}. Push anything that is not pushed yet.`,
+    `Then reply with a final ${update ? "update" : "report"} for the main agent you were forked from: what was decided, the commits you pushed (short SHAs), what is left, and what the main agent must do next (for example, rebase the PRs stacked on this one).`,
+    `Reply with the report only, a few short lines; it is forwarded to the main agent verbatim. Do not send it yourself.`,
+    note?.trim() ? `\nThe human's note: ${note.trim()}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+
+export const reportMessage = (pr: Pick<Pr, "number" | "title">, summary: string, update: boolean) =>
+  `[prs] #${pr.number} (${pr.title})${update ? " update" : ""}: ${summary.trim()}`;
+
+/** The fork's report pill: highlighted when its PR is merged or closed, so the human decides whether to finish. */
+export function reportPillFor(pr: Pick<Pr, "state"> | undefined): { label: string; icon: string; title: string } {
+  if (pr?.state === "MERGED") return { label: "PR merged — report & finish?", icon: "GitMerge", title: "The PR is merged: report to the main chat" };
+  if (pr?.state === "CLOSED") return { label: "PR closed — report & finish?", icon: "GitPullRequestClosed", title: "The PR is closed: report to the main chat" };
+  return { label: "Report to main", icon: "Undo2", title: "Report to the main chat" };
+}
+
+/** The report button: Done the first time, an update after that; disabled while the fork works or writes. */
+export function reportButton(report: ReportState | undefined, running: boolean): { label: string; disabled: boolean } {
+  if (report?.state === "writing") return { label: "Writing the report…", disabled: true };
+  return { label: report?.sent ? "↩ Send update to main chat" : "↩ Done, report to main chat", disabled: running };
+}

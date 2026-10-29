@@ -27,7 +27,7 @@ export interface PrsStore {
   open(agentId: string): Promise<void>;
 }
 
-type Styles = ReturnType<typeof makeStyles>;
+export type Styles = ReturnType<typeof makeStyles>;
 
 export function makePopover(store: PrsStore): ComponentType<PluginButtonContentProps> {
   return function PrsPopover(props: PluginButtonContentProps) {
@@ -194,7 +194,7 @@ function LinkField(props: { styles: Styles; link(refs: string[]): Promise<LinkRe
   );
 }
 
-function Button(props: { styles: Styles; label: string; onPress(): void; primary?: boolean; disabled?: boolean }) {
+export function Button(props: { styles: Styles; label: string; onPress(): void; primary?: boolean; disabled?: boolean }) {
   const { styles } = props;
   return (
     <Pressable
@@ -209,7 +209,7 @@ function Button(props: { styles: Styles; label: string; onPress(): void; primary
   );
 }
 
-function makeStyles(theme: PluginTheme, compact: boolean) {
+export function makeStyles(theme: PluginTheme, compact: boolean) {
   const { colors } = theme;
   return {
     // The host popover pads, scrolls and caps its size; sizing it here again clips it.
