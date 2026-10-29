@@ -115,7 +115,7 @@ describe("forkIntoPr", () => {
     const options = created[0] as Record<string, any>;
     expect(options).toMatchObject({
       cwd: "/repo",
-      worktree: { mode: "checkout-pr", prNumber: 7 },
+      worktree: { mode: "checkout-pr", prNumber: 7, projectPath: "o/r" },
       background: false,
       config: { provider: "claude/claude-opus-5-5", modeId: "plan", thinkingOptionId: "high", featureValues: { fast: true } },
       labels: { "prs.forkedFrom": "src", "prs.pr": "https://github.com/o/r/pull/7" },
