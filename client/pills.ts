@@ -1,9 +1,30 @@
 import type { PluginButton, PluginButtonRegistration, PluginClientContext } from "@getpaseo/plugin/client";
-import { canFork, forkPr, linkPrs, listPrs, pillFor, prAgentFor, unlinkPrs, type Branch, type Pr, type RowTarget } from "../shared/prs";
+import {
+  canFork,
+  FORKED_FROM_LABEL,
+  forkPr,
+  linkPrs,
+  listPrs,
+  listReports,
+  pillFor,
+  PR_LABEL,
+  prAgentFor,
+  relatedPrs,
+  reportPillFor,
+  reportPr,
+  unlinkPrs,
+  type Branch,
+  type Pr,
+  type ReportState,
+  type RowTarget,
+} from "../shared/prs";
 import { makePopover, type AgentPrs, type PrsStore } from "./PrsPopover";
+import { makeReportPopover, type ForkReport, type ReportStore } from "./ReportPopover";
 
 // Server reads are cached for 30 s; this only bounds how stale a pill gets while nothing happens.
 const POLL_MS = 60_000;
+// While a fork writes its report, how often to look for the outcome.
+const REPORT_POLL_MS = 2_000;
 
 interface AgentInfo {
   id: string;
@@ -36,20 +57,40 @@ export function contributePills(client: PluginClientContext, openAgent: (agentId
   const branches = new Map<string, Branch>();
   const linked = new Map<string, Pr[]>();
   const pills = new Map<string, PluginButtonRegistration>();
+  // Forks (agents with prs.forkedFrom) get a second pill to report back to their main chat.
+  const reports = new Map<string, ReportState>();
+  const reportPills = new Map<string, PluginButtonRegistration>();
+  const reportViews = new Map<string, ForkReport>();
   // What the popovers read; they re-render when an agent's entry changes.
   const views = new Map<string, AgentPrs>();
   const listeners = new Set<() => void>();
 
   const refresh = async (workspaces: { workspaceId: string; cwd: string }[], force = false) => {
     if (!workspaces.length || lifetime.signal.aborted) return;
-    const result = await client.rpc(listPrs, { workspaces, force });
+    const forks = forkIds();
+    const [result, states] = await Promise.all([
+      client.rpc(listPrs, { workspaces, force }),
+      forks.length ? client.rpc(listReports, { agentIds: forks }) : Promise.resolve({ reports: {} }),
+    ]);
     for (const branch of result.branches) branches.set(branch.cwd, branch);
     for (const entry of result.links) linked.set(entry.workspaceId, entry.prs);
+    applyReports(states.reports);
     // Any agent's rows can change: they point at other workspaces that are on the same PRs.
     renderAll();
   };
   const refreshQuietly = (workspaces: { workspaceId: string; cwd: string }[], force = false) =>
     void refresh(workspaces, force).catch((error) => console.error("[prs] refresh failed", error));
+  const forkIds = () => [...agents.values()].filter((agent) => agent.labels[FORKED_FROM_LABEL]).map((agent) => agent.id);
+  const applyReports = (states: Record<string, ReportState>) => {
+    reports.clear();
+    for (const [agentId, state] of Object.entries(states)) reports.set(agentId, state);
+  };
+  const refreshReports = async () => {
+    const forks = forkIds();
+    if (!forks.length || lifetime.signal.aborted) return;
+    applyReports((await client.rpc(listReports, { agentIds: forks })).reports);
+    renderAll();
+  };
   const all = () => [...new Map([...agents.values()].map((agent) => [`${agent.workspaceId}\0${agent.cwd}`, agent])).values()];
 
   const store: PrsStore = {
@@ -83,8 +124,19 @@ export function contributePills(client: PluginClientContext, openAgent: (agentId
     },
   };
   const behavior: PluginButton["behavior"] = { kind: "popover", Content: makePopover(store) };
+  const reportStore: ReportStore = {
+    get: (agentId) => reportViews.get(agentId),
+    subscribe: store.subscribe,
+    async report(agentId, note, archive) {
+      reports.set(agentId, await client.rpc(reportPr, { agentId, note: note.trim() || undefined, archive }));
+      render(agentId);
+    },
+    open: store.open,
+  };
+  const reportBehavior: PluginButton["behavior"] = { kind: "popover", Content: makeReportPopover(reportStore) };
 
   const render = (agentId: string) => {
+    renderReport(agentId);
     const agent = agents.get(agentId);
     const spec = agent ? pillFor(branches.get(agent.cwd), linked.get(agent.workspaceId) ?? []) : null;
     if (!agent || !spec) {
@@ -111,9 +163,32 @@ export function contributePills(client: PluginClientContext, openAgent: (agentId
     else pills.set(agentId, client.addComposerPill({ id: "prs", workspaceId: agent.workspaceId, agentId, button: { ...face, behavior } }));
   };
 
+  /** The fork's report pill: its PR's state on the face, the report state in the popover. */
+  const renderReport = (agentId: string) => {
+    const agent = agents.get(agentId);
+    const mainAgentId = agent?.labels[FORKED_FROM_LABEL];
+    if (!agent || !mainAgentId) {
+      reportPills.get(agentId)?.remove();
+      reportPills.delete(agentId);
+      reportViews.delete(agentId);
+      return;
+    }
+    const url = agent.labels[PR_LABEL]?.toLowerCase();
+    const pr = relatedPrs(branches.get(agent.cwd), linked.get(agent.workspaceId) ?? []).find((row) => row.url.toLowerCase() === url);
+    const prDone = pr?.state === "MERGED" ? "merged" : pr?.state === "CLOSED" ? "closed" : null;
+    reportViews.set(agentId, { mainAgentId, prNumber: pr?.number ?? null, prDone, report: reports.get(agentId), running: agent.running });
+    const face = reportPillFor(pr);
+    const pill = reportPills.get(agentId);
+    if (pill) pill.update(face);
+    else reportPills.set(agentId, client.addComposerPill({ id: "prs-report", workspaceId: agent.workspaceId, agentId, button: { ...face, behavior: reportBehavior } }));
+  };
+
   const clear = () => {
     for (const pill of pills.values()) pill.remove();
     pills.clear();
+    for (const pill of reportPills.values()) pill.remove();
+    reportPills.clear();
+    reportViews.clear();
     agents.clear();
     views.clear();
     for (const listener of listeners) listener();
@@ -141,6 +216,12 @@ export function contributePills(client: PluginClientContext, openAgent: (agentId
   };
 
   const timer = setInterval(() => refreshQuietly(all()), POLL_MS);
+  // The server forwards a report as the fork's turn ends, a moment after the agent goes idle here.
+  const reportTimer = setInterval(() => {
+    if ([...reports.values()].some((report) => report.state === "writing")) {
+      void refreshReports().catch((error) => console.error("[prs] report refresh failed", error));
+    }
+  }, REPORT_POLL_MS);
 
   void client.paseo.agents
     .list({ subscribe: {}, signal: lifetime.signal })
@@ -170,6 +251,7 @@ export function contributePills(client: PluginClientContext, openAgent: (agentId
   return () => {
     lifetime.abort();
     clearInterval(timer);
+    clearInterval(reportTimer);
     clear();
   };
 }
