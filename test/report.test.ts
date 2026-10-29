@@ -1,6 +1,6 @@
 import type { PaseoApi } from "@getpaseo/client";
 import { describe, expect, it } from "vitest";
-import { latestReply, Reports, ReportStore } from "../server/reports";
+import { replyTo, Reports, ReportStore } from "../server/reports";
 import { reportButton, reportMessage, reportPillFor, reportPrompt } from "../shared/prs";
 
 const PR_URL = "https://github.com/o/r/pull/170";
@@ -23,9 +23,9 @@ describe("report text", () => {
 
 describe("report pill and button", () => {
   it("highlights a merged or closed PR", () => {
-    expect(reportPillFor({ state: "OPEN" }).label).toBe("↩ Report");
-    expect(reportPillFor(undefined).label).toBe("↩ Report");
-    expect(reportPillFor({ state: "UNKNOWN" }).label).toBe("↩ Report");
+    expect(reportPillFor({ state: "OPEN" }).label).toBe("Report to main");
+    expect(reportPillFor(undefined).label).toBe("Report to main");
+    expect(reportPillFor({ state: "UNKNOWN" }).label).toBe("Report to main");
     expect(reportPillFor({ state: "MERGED" })).toMatchObject({ label: "PR merged — report & finish?", icon: "GitMerge" });
     expect(reportPillFor({ state: "CLOSED" }).label).toBe("PR closed — report & finish?");
   });
@@ -38,18 +38,20 @@ describe("report pill and button", () => {
   });
 });
 
-describe("latestReply", () => {
-  it("joins the assistant text after the last user message", () => {
-    expect(
-      latestReply([
-        { type: "assistant_message", text: "old" },
-        { type: "user_message", text: "report" },
-        { type: "assistant_message", text: "Decided X. " },
-        { type: "tool_call" },
-        { type: "assistant_message", text: "Pushed a1b2c3." },
-      ]),
-    ).toBe("Decided X. Pushed a1b2c3.");
-    expect(latestReply([{ type: "user_message", text: "hi" }])).toBe("");
+describe("replyTo", () => {
+  it("joins the assistant text after the prompt, up to the next user message", () => {
+    const timeline = [
+      { type: "assistant_message", text: "old" },
+      { type: "user_message", text: "report please" },
+      { type: "assistant_message", text: "Decided X. " },
+      { type: "tool_call" },
+      { type: "assistant_message", text: "Pushed a1b2c3." },
+      { type: "user_message", text: "thanks" },
+      { type: "assistant_message", text: "later" },
+    ];
+    expect(replyTo(timeline, " report please ")).toBe("Decided X. Pushed a1b2c3.");
+    expect(replyTo(timeline, "something else")).toBeNull();
+    expect(replyTo([{ type: "user_message", text: "report please" }], "report please")).toBe("");
   });
 });
 
@@ -61,7 +63,9 @@ interface Agent {
   labels: Record<string, string>;
 }
 
-function fakePaseo(agents: Record<string, Agent>) {
+type Item = { type: string; text?: string; at?: string };
+
+function fakePaseo(agents: Record<string, Agent>, timelines: Record<string, Item[]>) {
   const sent: { to: string; text: string; options?: Record<string, unknown> }[] = [];
   const archived: string[] = [];
   const paseo = {
@@ -73,6 +77,7 @@ function fakePaseo(agents: Record<string, Agent>) {
           return agents[id]?.archivedAt ?? null;
         },
         send: async (text: string, options?: Record<string, unknown>) => void sent.push({ to: id, text, options }),
+        timeline: { refetch: async () => ({ entries: (timelines[id] ?? []).map(({ at, ...item }) => ({ item, timestamp: at ?? "2026-10-29T09:00:00.000Z" })) }) },
       }),
     },
     workspaces: { ref: (id: string) => ({ archive: async () => void archived.push(id) }) },
@@ -80,36 +85,46 @@ function fakePaseo(agents: Record<string, Agent>) {
   return { paseo, sent, archived };
 }
 
+const done = { kind: "completed" } as const;
+const forkAgent = { id: "fork", workspaceId: "wf" };
+
 function setup(main: Partial<Agent> = {}, fork: Partial<Agent> = {}) {
   const agents: Record<string, Agent> = {
     main: { id: "main", status: "idle", archivedAt: null, cwd: "/repo", labels: {}, ...main },
     fork: { id: "fork", status: "idle", archivedAt: null, cwd: "/wt", labels: { "prs.forkedFrom": "main", "prs.pr": PR_URL }, ...fork },
   };
-  const fake = fakePaseo(agents);
+  const timelines: Record<string, Item[]> = {};
+  const fake = fakePaseo(agents, timelines);
   const details = async () => ({ number: 170, title: "Fix auth", url: PR_URL, body: null, baseRefName: null, headRefName: null });
-  const reports = new Reports(() => fake.paseo, new ReportStore(null), details);
-  return { ...fake, reports, agents };
+  // Each click and each turn a minute later than the last, like the daemon's timestamps.
+  let minute = 0;
+  const tick = () => new Date(Date.UTC(2026, 9, 29, 9, ++minute)).toISOString();
+  const reports = new Reports(() => fake.paseo, new ReportStore(null), details, () => new Date(tick()));
+  /** The fork runs a turn: it answers the last message it was sent with `text`, then the turn ends. */
+  const turn = (text: string | null, outcome: Parameters<Reports["turnEnded"]>[1] = done) => {
+    const prompt = [...fake.sent].reverse().find((message) => message.to === "fork")?.text ?? "hello";
+    const at = tick();
+    timelines.fork = [...(timelines.fork ?? []), { type: "user_message", text: prompt, at }, ...(text ? [{ type: "assistant_message", text, at }] : [])];
+    return reports.turnEnded(forkAgent, outcome);
+  };
+  return { ...fake, reports, agents, timelines, turn };
 }
-
-const done = { kind: "completed" } as const;
-const reply = (text: string) => [{ type: "user_message", text: "report" }, { type: "assistant_message", text }];
-const forkAgent = { id: "fork", workspaceId: "wf" };
 
 describe("Reports", () => {
   it("never sends to the main chat without the Done button", async () => {
-    const { paseo, reports, sent } = setup();
-    await reports.turnEnded(forkAgent, done, reply("I am done, telling main."));
+    const { paseo, reports, turn, sent } = setup();
+    await turn("I am done, telling main.");
     expect(sent).toEqual([]);
   });
 
   it("prompts the fork, then forwards that one turn's reply as an agent message", async () => {
-    const { paseo, reports, sent } = setup();
+    const { paseo, reports, turn, sent } = setup();
     expect(await reports.start(paseo, { agentId: "fork", note: "ship it" })).toMatchObject({ state: "writing", sent: 0 });
     expect(sent).toHaveLength(1);
     expect(sent[0]).toMatchObject({ to: "fork" });
     expect(sent[0]!.text).toContain("The human's note: ship it");
 
-    await reports.turnEnded(forkAgent, done, reply("Merged the fix. Rebase #171."));
+    await turn("Merged the fix. Rebase #171.");
     expect(sent[1]).toEqual({
       to: "main",
       text: "[prs] #170 (Fix auth): Merged the fix. Rebase #171.",
@@ -118,29 +133,50 @@ describe("Reports", () => {
     expect(reports.states(["fork"]).fork).toMatchObject({ state: "sent", sent: 1 });
 
     // The next turn is not a report.
-    await reports.turnEnded(forkAgent, done, reply("More work."));
+    await turn("More work.");
     expect(sent).toHaveLength(2);
   });
 
-  it("labels a second report as an update", async () => {
+  it("waits past a turn whose timeline does not have the report prompt yet", async () => {
     const { paseo, reports, sent } = setup();
     await reports.start(paseo, { agentId: "fork" });
-    await reports.turnEnded(forkAgent, done, reply("First."));
+    // A turn_ended can arrive before the prompt is in the timeline; it is not the report turn.
+    await reports.turnEnded(forkAgent, done);
+    expect(reports.states(["fork"]).fork?.state).toBe("writing");
+    expect(sent).toHaveLength(1);
+  });
+
+  it("does not forward the reply to an earlier identical prompt", async () => {
+    const { paseo, reports, turn, sent } = setup();
+    await reports.start(paseo, { agentId: "fork" });
+    await turn("Stale.", { kind: "canceled", reason: "user" });
+    await reports.start(paseo, { agentId: "fork" });
+    expect(sent[1]!.text).toBe(sent[0]!.text);
+    await reports.turnEnded(forkAgent, done);
+    expect(sent).toHaveLength(2);
+    await turn("Fresh.");
+    expect(sent[2]!.text).toBe("[prs] #170 (Fix auth): Fresh.");
+  });
+
+  it("labels a second report as an update", async () => {
+    const { paseo, reports, turn, sent } = setup();
+    await reports.start(paseo, { agentId: "fork" });
+    await turn("First.");
     await reports.start(paseo, { agentId: "fork" });
     expect(sent[2]!.text).toContain("final update");
-    await reports.turnEnded(forkAgent, done, reply("Second."));
+    await turn("Second.");
     expect(sent[3]).toMatchObject({ text: "[prs] #170 (Fix auth) update: Second.", options: { messageId: "prs-report-fork-2" } });
   });
 
   it("sends nothing when the report turn is canceled or empty", async () => {
-    const { paseo, reports, sent } = setup();
+    const { paseo, reports, turn, sent } = setup();
     await reports.start(paseo, { agentId: "fork" });
-    await reports.turnEnded(forkAgent, { kind: "canceled", reason: "user" }, reply("half"));
+    await turn("half", { kind: "canceled", reason: "user" });
     expect(sent).toHaveLength(1);
     expect(reports.states(["fork"]).fork).toMatchObject({ state: "failed", error: "Report not sent: the turn was canceled" });
 
     await reports.start(paseo, { agentId: "fork" });
-    await reports.turnEnded(forkAgent, done, [{ type: "user_message", text: "report" }]);
+    await turn(null);
     expect(sent).toHaveLength(2);
     expect(reports.states(["fork"]).fork?.state).toBe("failed");
   });
@@ -165,19 +201,19 @@ describe("Reports", () => {
   });
 
   it("fails the report when the main chat was archived meanwhile", async () => {
-    const { paseo, reports, sent, agents } = setup();
+    const { paseo, reports, turn, sent, agents } = setup();
     await reports.start(paseo, { agentId: "fork" });
     agents.main!.archivedAt = "2026-10-29";
-    await reports.turnEnded(forkAgent, done, reply("Report."));
+    await turn("Report.");
     expect(sent).toHaveLength(1);
     expect(reports.states(["fork"]).fork).toMatchObject({ state: "failed", error: "The main chat is archived", sent: 0 });
   });
 
   it("archives the fork's workspace after sending when asked", async () => {
-    const { paseo, reports, archived, sent } = setup();
+    const { paseo, reports, turn, archived, sent } = setup();
     await reports.start(paseo, { agentId: "fork", archive: true });
     expect(archived).toEqual([]);
-    await reports.turnEnded(forkAgent, done, reply("Report."));
+    await turn("Report.");
     expect(sent).toHaveLength(2);
     expect(archived).toEqual(["wf"]);
   });

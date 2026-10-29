@@ -53,9 +53,9 @@ export default function contribute(server: PluginServerContext) {
   });
 
   // Only the turn the Done button started is forwarded; Reports ignores every other turn.
-  server.on("agent.turn_ended", ({ agent, outcome, timeline }, { paseo: api }) => {
+  server.on("agent.turn_ended", ({ agent, outcome }, { paseo: api }) => {
     capture(api);
-    return reports.turnEnded(agent, outcome, timeline);
+    return reports.turnEnded(agent, outcome);
   });
 
   server.handle(listPrs, async ({ workspaces, force }, { paseo: api }) => {

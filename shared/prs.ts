@@ -353,7 +353,7 @@ export const reportMessage = (pr: Pick<Pr, "number" | "title">, summary: string,
 export function reportPillFor(pr: Pick<Pr, "state"> | undefined): { label: string; icon: string; title: string } {
   if (pr?.state === "MERGED") return { label: "PR merged — report & finish?", icon: "GitMerge", title: "The PR is merged: report to the main chat" };
   if (pr?.state === "CLOSED") return { label: "PR closed — report & finish?", icon: "GitPullRequestClosed", title: "The PR is closed: report to the main chat" };
-  return { label: "↩ Report", icon: "Undo2", title: "Report to the main chat" };
+  return { label: "Report to main", icon: "Undo2", title: "Report to the main chat" };
 }
 
 /** The report button: Done the first time, an update after that; disabled while the fork works or writes. */

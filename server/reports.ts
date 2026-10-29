@@ -5,12 +5,16 @@ import { FORKED_FROM_LABEL, PR_LABEL, reportMessage, reportPrompt, type ReportIn
 import type { PrDetails } from "./github";
 
 const MAX_REPORT_CHARS = 8000;
+const TIMELINE_LIMIT = 200;
 
 /** A report the human asked for and the fork is writing: where it goes and what happens after. */
 interface Pending {
   mainAgentId: string;
   pr: { number: number; title: string; url: string };
   archive: boolean;
+  /** The prompt the Done button sent, and when: the report is the reply after it, not after an earlier identical one. */
+  prompt: string;
+  sentAt: string;
 }
 
 interface Entry extends ReportState {
@@ -50,13 +54,23 @@ export class ReportStore {
 
 const publicState = ({ pending: _pending, ...state }: Entry): ReportState => state;
 
-/** The assistant text after the last user message; streamed replies arrive as several items. */
-export function latestReply(timeline: readonly { type: string; text?: string }[]): string {
-  const parts: string[] = [];
-  for (let index = timeline.length - 1; index >= 0; index--) {
+type TimelineItem = { type: string; text?: string };
+
+/**
+ * The assistant text after the last `prompt` user message, up to the next user message; streamed replies
+ * arrive as several items. Null when the prompt is not in the timeline (the turn was about something else).
+ */
+export function replyTo(timeline: readonly TimelineItem[], prompt: string): string | null {
+  let start = -1;
+  for (let index = timeline.length - 1; index >= 0 && start < 0; index--) {
     const item = timeline[index]!;
+    if (item.type === "user_message" && item.text?.trim() === prompt.trim()) start = index;
+  }
+  if (start < 0) return null;
+  const parts: string[] = [];
+  for (const item of timeline.slice(start + 1)) {
     if (item.type === "user_message") break;
-    if (item.type === "assistant_message" && item.text) parts.unshift(item.text);
+    if (item.type === "assistant_message" && item.text) parts.push(item.text);
   }
   return parts.join("").trim().slice(0, MAX_REPORT_CHARS);
 }
@@ -72,6 +86,7 @@ export class Reports {
     private readonly paseo: () => PaseoApi | null,
     private readonly store: ReportStore,
     private readonly prDetails: (cwd: string, url: string) => Promise<PrDetails>,
+    private readonly now: () => Date = () => new Date(),
   ) {}
 
   states(agentIds: readonly string[]): Record<string, ReportState> {
@@ -90,14 +105,14 @@ export class Reports {
     if (snapshot.status === "running" || snapshot.status === "initializing") throw new Error("The agent is working; wait for its turn to end");
     await mainChat(api, mainAgentId);
     const details = await this.prDetails(snapshot.cwd, prUrl);
-    const update = (current?.sent ?? 0) > 0;
+    const prompt = reportPrompt(details, note, (current?.sent ?? 0) > 0);
     const state = this.store.set(agentId, {
       sent: current?.sent ?? 0,
       state: "writing",
-      pending: { mainAgentId, pr: { number: details.number, title: details.title, url: details.url }, archive: archive ?? false },
+      pending: { mainAgentId, pr: { number: details.number, title: details.title, url: details.url }, archive: archive ?? false, prompt, sentAt: this.now().toISOString() },
     });
     try {
-      await fork.send(reportPrompt(details, note, update));
+      await fork.send(prompt);
     } catch (error) {
       this.fail(agentId, error);
       throw error;
@@ -105,17 +120,24 @@ export class Reports {
     return state;
   }
 
-  /** Forwards the reply of the turn the Done button started; any other turn of any agent is ignored. */
-  async turnEnded(agent: { id: string; workspaceId: string | null }, outcome: TurnOutcome, timeline: readonly { type: string; text?: string }[]): Promise<void> {
+  /**
+   * Forwards the reply to the Done button's prompt; any other turn of any agent is ignored. Reads the
+   * timeline itself: the hook's `timeline` can arrive empty.
+   */
+  async turnEnded(agent: { id: string; workspaceId: string | null }, outcome: TurnOutcome): Promise<void> {
     const entry = this.store.get(agent.id);
     const pending = entry?.pending;
     if (!entry || !pending || entry.state !== "writing") return;
     if (outcome.kind !== "completed") return void this.fail(agent.id, `Report not sent: the turn ${outcome.kind === "failed" ? `failed (${outcome.error.message})` : "was canceled"}`);
-    const summary = latestReply(timeline);
-    if (!summary) return void this.fail(agent.id, "Report not sent: the agent wrote nothing");
     try {
       const api = this.paseo();
       if (!api) throw new Error("Paseo is not connected yet");
+      const timeline = await api.agents.ref(agent.id).timeline.refetch({ direction: "tail", limit: TIMELINE_LIMIT, projection: "projected" });
+      const since = timeline.entries.filter((entry) => entry.timestamp >= pending.sentAt);
+      const summary = replyTo(since.map((entry) => entry.item as TimelineItem), pending.prompt);
+      // Not the report turn yet; the next turn_ended looks again.
+      if (summary === null) return;
+      if (!summary) throw new Error("Report not sent: the agent wrote nothing");
       const main = await mainChat(api, pending.mainAgentId);
       const update = entry.sent > 0;
       // The same envelope as send_agent_prompt; steer joins a running turn instead of interrupting it.

@@ -103,7 +103,6 @@ export function makeReportPopover(store: ReportStore): ComponentType<PluginButto
 function statusLine({ report }: ForkReport): string | null {
   if (!report) return null;
   const at = new Date(report.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-  if (report.state === "writing") return "Writing the report…";
   if (report.state === "failed") return report.error ?? "Report not sent";
   if (report.state === "sent") return `Sent to the main chat at ${at}${report.sent > 1 ? ` (${report.sent} reports)` : ""}.`;
   return null;
