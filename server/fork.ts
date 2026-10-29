@@ -1,5 +1,5 @@
 import type { PaseoApi } from "@getpaseo/client";
-import { forkPrompt, FORKED_FROM_LABEL, PR_LABEL, type ForkInput, type ForkResult } from "../shared/prs";
+import { forkPrompt, FORKED_FROM_LABEL, parsePrRef, PR_LABEL, type ForkInput, type ForkResult } from "../shared/prs";
 import { readPrDetails, type PrDetails } from "./github";
 
 // Matches the budget of Paseo's own "Fork in a new workspace" chat history.
@@ -65,9 +65,12 @@ export async function forkIntoPr(paseo: PaseoApi, { agentId, prUrl }: ForkInput,
   const model = agent.runtimeInfo?.model ?? agent.model;
   const modeId = agent.currentModeId ?? agent.runtimeInfo?.modeId ?? undefined;
   const thinkingOptionId = agent.thinkingOptionId ?? agent.runtimeInfo?.thinkingOptionId ?? undefined;
+  // Name the PR's repo: left to itself, the daemon asks `gh repo view`, which picks an `upstream` remote over origin.
+  // A variable, not an inline literal: @getpaseo/plugin 0.12.0's types predate `projectPath`. Daemons before it ignore the field.
+  const worktree = { mode: "checkout-pr" as const, prNumber: pr.number, projectPath: parsePrRef(pr.url, null)?.repo };
   const created = await paseo.agents.create({
     cwd: agent.cwd,
-    worktree: { mode: "checkout-pr", prNumber: pr.number },
+    worktree,
     background: false,
     title: `PR #${pr.number}: ${pr.title}`,
     config: {
