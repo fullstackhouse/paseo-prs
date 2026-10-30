@@ -72,7 +72,6 @@ export const forkPrompt = (pr: Pick<Pr, "number" | "url">, sourceTitle: string |
   `You were forked from ${sourceTitle ? `the agent "${sourceTitle}"` : "another agent"}, which works on several related PRs; ` +
   `its chat history and the PR are attached. Read them, then say what state the PR is in and wait for instructions.`;
 
-export const CREATE_PR_PROMPT = "Open a pull request for this branch.";
 export const fixChecksPrompt = (pr: Pr) => `PR #${pr.number} (${pr.url}) has failing checks. Fix them and push.`;
 export const addressReviewPrompt = (pr: Pr) =>
   `PR #${pr.number} (${pr.url}) has changes requested. Address the review comments and push.`;
