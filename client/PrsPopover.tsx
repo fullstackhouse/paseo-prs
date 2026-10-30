@@ -3,7 +3,7 @@ import { openExternalUrl, type PluginButtonContentProps } from "@getpaseo/plugin
 import { Icon, TextInput } from "@getpaseo/plugin/client/react-native";
 import { useMemo, useState, useSyncExternalStore, type ComponentType } from "react";
 import { Pressable, Text, View } from "react-native";
-import { addressReviewPrompt, CREATE_PR_PROMPT, fixChecksPrompt, prIcon, rowDetail, type LinkResult, type RelatedPr, type RowTarget } from "../shared/prs";
+import { addressReviewPrompt, fixChecksPrompt, prIcon, rowDetail, type LinkResult, type RelatedPr, type RowTarget } from "../shared/prs";
 
 /** What one agent's popover shows. */
 export interface AgentPrs {
@@ -20,6 +20,8 @@ export interface PrsStore {
   subscribe(listener: () => void): () => void;
   /** Interrupts a running turn; callers disable prompting while the agent runs. */
   send(agentId: string, text: string): Promise<void>;
+  /** Sends Paseo's PR prompt (base branch, PR template, project PR preferences) to the agent. */
+  createPr(agentId: string): Promise<void>;
   link(agentId: string, refs: string[]): Promise<LinkResult>;
   unlink(agentId: string, url: string): Promise<void>;
   /** Forks the agent's chat into a new workspace on the PR, then opens it. */
@@ -83,7 +85,13 @@ export function makePopover(store: PrsStore): ComponentType<PluginButtonContentP
           />
         ))}
         {view.canCreate && (
-          <Button styles={styles} primary label="Ask agent to open a PR" disabled={view.running} onPress={() => prompt(CREATE_PR_PROMPT)} />
+          <Button styles={styles} primary label="Ask agent to open a PR" disabled={view.running} onPress={() =>
+              act(async () => {
+                await store.createPr(agentId);
+                props.close();
+              })
+            }
+          />
         )}
       </View>
     );

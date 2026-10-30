@@ -26,6 +26,12 @@ const POLL_MS = 60_000;
 // While a fork writes its report, how often to look for the outcome.
 const REPORT_POLL_MS = 2_000;
 
+/** Paseo FSH builds add this to workspace refs; @getpaseo/plugin 0.12.0 types don't have it yet. */
+interface PullRequestPromptSource {
+  pullRequestPrompt(): Promise<string>;
+}
+type WorkspaceRef = ReturnType<PluginClientContext["paseo"]["workspaces"]["ref"]>;
+
 interface AgentInfo {
   id: string;
   workspaceId: string;
@@ -100,6 +106,13 @@ export function contributePills(client: PluginClientContext, openAgent: (agentId
       return () => listeners.delete(listener);
     },
     send: (agentId, text) => client.paseo.agents.ref(agentId).send(text),
+    async createPr(agentId) {
+      const agent = agents.get(agentId);
+      if (!agent) throw new Error("This agent is gone");
+      const workspace: WorkspaceRef & Partial<PullRequestPromptSource> = client.paseo.workspaces.ref(agent.workspaceId);
+      if (typeof workspace.pullRequestPrompt !== "function") throw new Error("Update Paseo to create PRs through an agent");
+      await store.send(agentId, await workspace.pullRequestPrompt());
+    },
     async link(agentId, refs) {
       const agent = agents.get(agentId);
       if (!agent) throw new Error("This agent is gone");
