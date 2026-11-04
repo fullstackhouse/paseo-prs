@@ -129,21 +129,25 @@ async function listOpenEdges(repo: string): Promise<PrEdge[]> {
     .map((pr) => ({ number: pr.number, head: pr.headRefName, base: pr.baseRefName }));
 }
 
-/** Open-PR edges per repo, not per checkout: every worktree of a repo shares one list per TTL, and one call in flight. */
+/**
+ * Open-PR edges per repo, not per checkout: every worktree of a repo shares one list per TTL, and one call in flight.
+ * A forced read shares the call in flight too, since agents going idle together each force one.
+ */
 export class EdgeCache {
-  private readonly entries = new Map<string, { at: number; value: Promise<PrEdge[]> }>();
+  private readonly entries = new Map<string, { at: number; pending: boolean; value: Promise<PrEdge[]> }>();
 
   constructor(private readonly list: (repo: string) => Promise<PrEdge[]> = listOpenEdges, private readonly now: () => number = Date.now) {}
 
   get(repo: string, force = false): Promise<PrEdge[]> {
     const key = repo.toLowerCase();
     const hit = this.entries.get(key);
-    if (hit && !force && this.now() - hit.at < TTL_MS) return hit.value;
-    const value = this.list(repo);
+    if (hit && (hit.pending || (!force && this.now() - hit.at < TTL_MS))) return hit.value;
+    const entry = { at: this.now(), pending: true, value: this.list(repo) };
     // A failure is kept for the TTL too, so the worktrees of a repo do not each retry it.
-    value.catch(() => {});
-    this.entries.set(key, { at: this.now(), value });
-    return value;
+    const settle = () => (entry.pending = false);
+    entry.value.then(settle, settle);
+    this.entries.set(key, entry);
+    return entry.value;
   }
 }
 
@@ -171,22 +175,41 @@ export async function readPrDetails(cwd: string, url: string): Promise<PrDetails
   return { body: null, baseRefName: null, headRefName: null, ...json };
 }
 
+/** Which branch the checkout is on and what it tracks, from git alone. */
+export async function readCheckout(cwd: string): Promise<string> {
+  const [branch, upstream] = await Promise.all([
+    git(cwd, "symbolic-ref", "--quiet", "--short", "HEAD").catch(() => ""),
+    git(cwd, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}").catch(() => ""),
+  ]);
+  return `${branch} ${upstream}`;
+}
+
 /**
  * Reads per working directory, shared by every client and agent in it, at most once per TTL unless forced. A branch whose
- * PRs are all merged or closed, with no stack, keeps for TERMINAL_TTL_MS. A failed read serves the previous one.
+ * PRs are all merged or closed, with no stack, keeps for TERMINAL_TTL_MS while the checkout stays on it. A failed read
+ * serves the previous one.
  */
 export class BranchCache {
-  private readonly entries = new Map<string, { at: number; ttl: number; value: Promise<Branch> }>();
+  private readonly entries = new Map<string, { at: number; ttl: number; checkout: Promise<string>; value: Promise<Branch> }>();
 
   constructor(
     private readonly read: (cwd: string, force: boolean) => Promise<Branch> = readBranch,
     private readonly now: () => number = Date.now,
+    private readonly checkout: (cwd: string) => Promise<string> = readCheckout,
   ) {}
 
-  get(cwd: string, force = false): Promise<Branch> {
+  async get(cwd: string, force = false): Promise<Branch> {
     const hit = this.entries.get(cwd);
-    if (hit && !force && this.now() - hit.at < hit.ttl) return hit.value;
-    const entry = { at: this.now(), ttl: TTL_MS, value: Promise.resolve(noBranch(cwd)) };
+    if (hit && !force) {
+      const age = this.now() - hit.at;
+      if (age < TTL_MS) return hit.value;
+      // Past the short TTL only a merged branch's snapshot is left, and it only holds while git is still on that branch.
+      if (age < hit.ttl && (await hit.checkout) === (await this.checkout(cwd))) return hit.value;
+      // Another read replaced the entry while git answered.
+      const current = this.entries.get(cwd);
+      if (current && current !== hit) return current.value;
+    }
+    const entry = { at: this.now(), ttl: TTL_MS, checkout: this.checkout(cwd), value: Promise.resolve(noBranch(cwd)) };
     entry.value = this.read(cwd, force).then(
       (branch) => {
         if (branch.prs.length && !branch.stack.length && branch.prs.every(terminal)) entry.ttl = TERMINAL_TTL_MS;

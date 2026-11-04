@@ -92,8 +92,8 @@ describe("PrCache", () => {
 
   it("keeps merged and closed PRs for an hour unless forced, and a forced read sees a reopen", async () => {
     let now = 0;
-    const closed = pr("o/r", 1, { state: "CLOSED" });
-    const github = fakeGitHub([closed, pr("o/r", 2, { state: "MERGED" }), pr("o/r", 3)]);
+    const backend = [pr("o/r", 1, { state: "CLOSED" }), pr("o/r", 2, { state: "MERGED" }), pr("o/r", 3)];
+    const github = fakeGitHub(backend);
     const cache = new PrCache(github.fetch, () => now);
     const refs = [1, 2, 3].map((number) => ({ repo: "o/r", number }));
 
@@ -102,7 +102,8 @@ describe("PrCache", () => {
     await cache.get(refs);
     expect(github.calls).toEqual([refs, [refs[2]]]);
 
-    closed.state = "OPEN";
+    // A new object, so the cached copy stays CLOSED and only the forced read can see the reopen.
+    backend[0] = pr("o/r", 1);
     expect((await cache.get([refs[0]!], true)).get(prUrl(refs[0]!))?.state).toBe("OPEN");
     now = 242_000;
     await cache.get(refs);

@@ -99,6 +99,22 @@ describe("EdgeCache", () => {
     await cache.get("x/y");
     expect(calls).toEqual(["o/r", "x/y", "o/r", "x/y"]);
   });
+
+  it("shares a call in flight with forced reads, and forces a new one once it settled", async () => {
+    const calls: string[] = [];
+    let answer = (_: PrEdge[]) => {};
+    const cache = new EdgeCache((repo) => {
+      calls.push(repo);
+      return new Promise((resolve) => (answer = resolve));
+    }, () => 0);
+
+    const reads = [cache.get("o/r"), cache.get("o/r", true), cache.get("o/r", true)];
+    expect(calls).toHaveLength(1);
+    answer([]);
+    await Promise.all(reads);
+    void cache.get("o/r", true);
+    expect(calls).toHaveLength(2);
+  });
 });
 
 describe("BranchCache", () => {
@@ -120,10 +136,14 @@ describe("BranchCache", () => {
       "/merged": branch("/merged", { prs: [pr({ state: "MERGED" }), pr({ number: 2, state: "CLOSED" })] }),
       "/open": branch("/open", { prs: [pr({ state: "MERGED" }), pr({ number: 2 })] }),
     };
-    const cache = new BranchCache(async (cwd) => {
-      reads.push(cwd);
-      return answers[cwd]!;
-    }, () => now);
+    const cache = new BranchCache(
+      async (cwd) => {
+        reads.push(cwd);
+        return answers[cwd]!;
+      },
+      () => now,
+      async () => "feat/x origin/feat/x",
+    );
 
     await Promise.all([cache.get("/merged"), cache.get("/open")]);
     now = 120_000;
@@ -135,6 +155,27 @@ describe("BranchCache", () => {
     now = 240_000;
     await cache.get("/merged");
     expect(reads.filter((cwd) => cwd === "/merged")).toHaveLength(3);
+  });
+
+  it("rereads a merged branch's checkout once git is on another branch", async () => {
+    let now = 0;
+    let checkout = "feat/x origin/feat/x";
+    const reads: string[] = [];
+    const cache = new BranchCache(
+      async (cwd) => {
+        reads.push(checkout);
+        return checkout.startsWith("feat/x") ? branch(cwd, { prs: [pr({ state: "MERGED" })] }) : branch(cwd, { branch: "feat/y" });
+      },
+      () => now,
+      async () => checkout,
+    );
+
+    await cache.get("/w");
+    now = 120_000;
+    expect((await cache.get("/w")).prs[0]?.state).toBe("MERGED");
+    checkout = "feat/y origin/feat/y";
+    expect((await cache.get("/w")).branch).toBe("feat/y");
+    expect(reads).toEqual(["feat/x origin/feat/x", "feat/y origin/feat/y"]);
   });
 
   it("serves the previous read while GitHub is rate limited", async () => {
