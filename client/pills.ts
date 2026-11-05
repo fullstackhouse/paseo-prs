@@ -1,6 +1,7 @@
 import type { PluginButton, PluginButtonRegistration, PluginClientContext } from "@getpaseo/plugin/client";
 import {
   canFork,
+  createPrPrompt,
   FORKED_FROM_LABEL,
   forkPr,
   linkPrs,
@@ -15,6 +16,7 @@ import {
   unlinkPrs,
   type Branch,
   type Pr,
+  type PullRequestPromptSource,
   type ReportState,
   type RowTarget,
 } from "../shared/prs";
@@ -26,10 +28,6 @@ const POLL_MS = 60_000;
 // While a fork writes its report, how often to look for the outcome.
 const REPORT_POLL_MS = 2_000;
 
-/** Paseo FSH builds add this to workspace refs; @getpaseo/plugin 0.12.0 types don't have it yet. */
-interface PullRequestPromptSource {
-  pullRequestPrompt(): Promise<string>;
-}
 type WorkspaceRef = ReturnType<PluginClientContext["paseo"]["workspaces"]["ref"]>;
 
 interface AgentInfo {
@@ -110,8 +108,7 @@ export function contributePills(client: PluginClientContext, openAgent: (agentId
       const agent = agents.get(agentId);
       if (!agent) throw new Error("This agent is gone");
       const workspace: WorkspaceRef & Partial<PullRequestPromptSource> = client.paseo.workspaces.ref(agent.workspaceId);
-      if (typeof workspace.pullRequestPrompt !== "function") throw new Error("Update Paseo to create PRs through an agent");
-      await store.send(agentId, await workspace.pullRequestPrompt());
+      await store.send(agentId, await createPrPrompt(workspace));
     },
     async link(agentId, refs) {
       const agent = agents.get(agentId);

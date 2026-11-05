@@ -360,3 +360,14 @@ export function reportButton(report: ReportState | undefined, running: boolean):
   if (report?.state === "writing") return { label: "Writing the report…", disabled: true };
   return { label: report?.sent ? "↩ Send update to main chat" : "↩ Done, report to main chat", disabled: running };
 }
+
+/** Paseo FSH builds add this to workspace refs; @getpaseo/plugin 0.12.0 types don't have it yet. */
+export interface PullRequestPromptSource {
+  pullRequestPrompt(): Promise<string>;
+}
+
+/** Paseo's own Create PR prompt for a workspace, or an error asking to update Paseo when it can't give one. */
+export async function createPrPrompt(workspace: Partial<PullRequestPromptSource>): Promise<string> {
+  if (typeof workspace.pullRequestPrompt !== "function") throw new Error("Update Paseo to create PRs through an agent");
+  return workspace.pullRequestPrompt();
+}
