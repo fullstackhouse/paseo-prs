@@ -1,6 +1,7 @@
 import type { PluginButton, PluginButtonRegistration, PluginClientContext } from "@getpaseo/plugin/client";
 import {
   canFork,
+  createPrPrompt,
   FORKED_FROM_LABEL,
   forkPr,
   linkPrs,
@@ -15,6 +16,7 @@ import {
   unlinkPrs,
   type Branch,
   type Pr,
+  type PullRequestPromptSource,
   type ReportState,
   type RowTarget,
 } from "../shared/prs";
@@ -25,6 +27,8 @@ import { makeReportPopover, type ForkReport, type ReportStore } from "./ReportPo
 const POLL_MS = 60_000;
 // While a fork writes its report, how often to look for the outcome.
 const REPORT_POLL_MS = 2_000;
+
+type WorkspaceRef = ReturnType<PluginClientContext["paseo"]["workspaces"]["ref"]>;
 
 interface AgentInfo {
   id: string;
@@ -100,6 +104,12 @@ export function contributePills(client: PluginClientContext, openAgent: (agentId
       return () => listeners.delete(listener);
     },
     send: (agentId, text) => client.paseo.agents.ref(agentId).send(text),
+    async createPr(agentId) {
+      const agent = agents.get(agentId);
+      if (!agent) throw new Error("This agent is gone");
+      const workspace: WorkspaceRef & Partial<PullRequestPromptSource> = client.paseo.workspaces.ref(agent.workspaceId);
+      await store.send(agentId, await createPrPrompt(workspace));
+    },
     async link(agentId, refs) {
       const agent = agents.get(agentId);
       if (!agent) throw new Error("This agent is gone");

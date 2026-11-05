@@ -72,7 +72,6 @@ export const forkPrompt = (pr: Pick<Pr, "number" | "url">, sourceTitle: string |
   `You were forked from ${sourceTitle ? `the agent "${sourceTitle}"` : "another agent"}, which works on several related PRs; ` +
   `its chat history and the PR are attached. Read them, then say what state the PR is in and wait for instructions.`;
 
-export const CREATE_PR_PROMPT = "Open a pull request for this branch.";
 export const fixChecksPrompt = (pr: Pr) => `PR #${pr.number} (${pr.url}) has failing checks. Fix them and push.`;
 export const addressReviewPrompt = (pr: Pr) =>
   `PR #${pr.number} (${pr.url}) has changes requested. Address the review comments and push.`;
@@ -360,4 +359,15 @@ export function reportPillFor(pr: Pick<Pr, "state"> | undefined): { label: strin
 export function reportButton(report: ReportState | undefined, running: boolean): { label: string; disabled: boolean } {
   if (report?.state === "writing") return { label: "Writing the report…", disabled: true };
   return { label: report?.sent ? "↩ Send update to main chat" : "↩ Done, report to main chat", disabled: running };
+}
+
+/** Paseo FSH builds add this to workspace refs; @getpaseo/plugin 0.12.0 types don't have it yet. */
+export interface PullRequestPromptSource {
+  pullRequestPrompt(): Promise<string>;
+}
+
+/** Paseo's own Create PR prompt for a workspace, or an error asking to update Paseo when it can't give one. */
+export async function createPrPrompt(workspace: Partial<PullRequestPromptSource>): Promise<string> {
+  if (typeof workspace.pullRequestPrompt !== "function") throw new Error("Update Paseo to create PRs through an agent");
+  return workspace.pullRequestPrompt();
 }

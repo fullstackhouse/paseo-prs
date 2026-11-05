@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  createPrPrompt,
   parsePrRef,
   parsePrs,
   parseRemote,
@@ -196,5 +197,15 @@ describe("rowDetail", () => {
     expect(rowDetail(pr({ checks: "none" }))).toBe("open");
     expect(rowDetail(pr({ state: "MERGED" }))).toBe("merged");
     expect(rowDetail(pr({ state: "UNKNOWN" }))).toBe("not found on GitHub");
+  });
+});
+
+describe("createPrPrompt", () => {
+  it("returns Paseo's prompt when the workspace has one", async () => {
+    await expect(createPrPrompt({ pullRequestPrompt: async () => "Open a PR against main" })).resolves.toBe("Open a PR against main");
+  });
+
+  it("asks to update Paseo when the workspace has no prompt", async () => {
+    await expect(createPrPrompt({})).rejects.toThrow("Update Paseo to create PRs through an agent");
   });
 });
