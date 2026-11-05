@@ -21,7 +21,7 @@ import {
 import { makePopover, type AgentPrs, type PrsStore } from "./PrsPopover";
 import { makeReportPopover, type ForkReport, type ReportStore } from "./ReportPopover";
 
-// Server reads are cached for 30 s; this only bounds how stale a pill gets while nothing happens.
+// Server reads are cached for 2 min (an hour for merged/closed PRs); this only bounds how stale a pill gets while nothing happens.
 const POLL_MS = 60_000;
 // While a fork writes its report, how often to look for the outcome.
 const REPORT_POLL_MS = 2_000;
