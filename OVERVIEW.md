@@ -14,7 +14,7 @@ Link a PR from the pill's popover (a PR URL, `owner/repo#123`, or `#123` in the 
 - Several: `PRs · 29 · 2 failing`.
 - A feature branch with commits and no PR gets **Create PR**. The default branch, a detached HEAD, or a branch with nothing to propose gets no pill until a PR is linked.
 
-Pressing the pill opens a list: number, title, checks and review state per PR, open ones first. A row opens the PR on GitHub. **Fork chat** or **Open** is described below. **Fix** and **Address** ask the agent to fix failing checks or address a review; they, and **Ask agent to open a PR**, are disabled while the agent is working, since a new prompt would interrupt its turn.
+Pressing the pill opens a list: number, title, checks and review state per PR, open ones first. A row opens the PR on GitHub. **Fork chat** or **Open** is described below. **Review** opens the PR's review in [paseo-inbox](https://github.com/fullstackhouse/paseo-inbox): its newest review draft, or **Start review** when it has none. It shows on open PRs when paseo-inbox is installed and the Paseo host can open another plugin's screen (the FSH build). **Fix** and **Address** ask the agent to fix failing checks or address a review; they, and **Ask agent to open a PR**, are disabled while the agent is working, since a new prompt would interrupt its turn.
 
 ## Fork the chat onto one PR
 

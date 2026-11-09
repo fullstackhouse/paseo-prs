@@ -3,6 +3,7 @@ import { openExternalUrl, type PluginButtonContentProps } from "@getpaseo/plugin
 import { Icon, TextInput } from "@getpaseo/plugin/client/react-native";
 import { useMemo, useState, useSyncExternalStore, type ComponentType } from "react";
 import { Pressable, Text, View } from "react-native";
+import { inboxReview } from "./inbox";
 import { addressReviewPrompt, fixChecksPrompt, prIcon, rowDetail, type LinkResult, type RelatedPr, type RowTarget } from "../shared/prs";
 
 /** What one agent's popover shows. */
@@ -39,6 +40,7 @@ export function makePopover(store: PrsStore): ComponentType<PluginButtonContentP
     const [note, setNote] = useState<{ text: string; danger: boolean } | null>(null);
     const [forking, setForking] = useState<string | null>(null);
     if (!agentId || !view) return <Text style={styles.muted}>No pull requests here.</Text>;
+    const openReview = inboxReview(props);
 
     const act = (task: () => Promise<unknown>) => {
       setNote(null);
@@ -64,6 +66,13 @@ export function makePopover(store: PrsStore): ComponentType<PluginButtonContentP
             prompt={prompt}
             unlink={() => act(() => store.unlink(agentId, pr.url))}
             target={view.targets[pr.url]}
+            review={
+              openReview &&
+              (() => {
+                props.close();
+                openReview(pr.url);
+              })
+            }
             forking={forking}
             fork={() =>
               act(async () => {
@@ -110,6 +119,8 @@ function PrRow(props: {
   forking: string | null;
   fork(): void;
   open(agentId: string): void;
+  /** Opens the PR's review in paseo-inbox; null when the host or the Inbox can't. */
+  review: (() => void) | null;
 }) {
   const { pr, styles, theme, target } = props;
   const { colors } = theme;
@@ -146,6 +157,7 @@ function PrRow(props: {
       {open && pr.review === "changes_requested" && (
         <Button styles={styles} label="Address" disabled={props.running} onPress={() => props.prompt(addressReviewPrompt(pr))} />
       )}
+      {open && props.review && <Button styles={styles} label="Review" onPress={props.review} />}
       {target?.kind === "open" && <Button styles={styles} label="Open" onPress={() => props.open(target.agentId)} />}
       {target?.kind === "fork" && (
         <Button
