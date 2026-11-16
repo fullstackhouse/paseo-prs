@@ -15,4 +15,16 @@ describe("inboxReview", () => {
     expect(inboxReview({ navigation: { openAgent: vi.fn() } })).toBeNull();
     expect(inboxReview({})).toBeNull();
   });
+
+  it("opens the review as a tab in the workspace the props name", () => {
+    const openPluginScreen = vi.fn();
+    const navigation = { openPluginScreen, hasPluginScreen: () => true };
+    inboxReview({ navigation, workspaceId: "ws-1" })!("acme/shop#7");
+    expect(openPluginScreen).toHaveBeenCalledWith({
+      pluginId: "paseo-inbox",
+      screenId: "review",
+      params: { pr: "acme/shop#7" },
+      workspaceId: "ws-1",
+    });
+  });
 });
