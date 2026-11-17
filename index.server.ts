@@ -1,5 +1,6 @@
 import type { PaseoApi } from "@getpaseo/client";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
+import { AutoLinker } from "./server/autolink";
 import { installBridge } from "./server/bridge";
 import { forkIntoPr } from "./server/fork";
 import { BranchCache, PrCache, readPrDetails } from "./server/github";
@@ -21,6 +22,7 @@ export default function contribute(server: PluginServerContext) {
     paseo ??= api;
   };
   const reports = new Reports(() => paseo, new ReportStore(dir), readPrDetails);
+  const autoLinker = new AutoLinker(() => paseo, links);
 
   /** The workspace of the agent behind an MCP call: by PASEO_AGENT_ID, else (Codex) the one mid-turn in its cwd. */
   const callerOf = async (agentId: string | null, cwd: string | null): Promise<WorkspaceRef | null> => {
@@ -52,10 +54,17 @@ export default function contribute(server: PluginServerContext) {
     await api.agents.ref(agent.id).respondToPermission({ requestId: request.id, response: { behavior: "allow" } });
   });
 
-  // Only the turn the Done button started is forwarded; Reports ignores every other turn.
-  server.on("agent.turn_ended", ({ agent, outcome }, { paseo: api }) => {
+  server.on("agent.turn_started", ({ agent }, { paseo: api }) => {
     capture(api);
-    return reports.turnEnded(agent, outcome);
+    autoLinker.turnStarted(agent.id);
+  });
+  server.on("agent.turn_ended", async ({ agent, outcome }, { paseo: api }) => {
+    capture(api);
+    // Only the turn the Done button started is forwarded; Reports ignores every other turn.
+    await Promise.all([
+      reports.turnEnded(agent, outcome),
+      autoLinker.turnEnded(agent).catch((error) => console.error("[prs] auto-link failed", error)),
+    ]);
   });
 
   server.handle(listPrs, async ({ workspaces, force }, { paseo: api }) => {
