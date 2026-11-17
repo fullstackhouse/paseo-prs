@@ -169,6 +169,16 @@ describe("pillFor", () => {
     expect(label(branch({ ahead: 0 }))).toBeNull();
   });
 
+  it("stops offering Create PR once the branch's changes are in its base", () => {
+    expect(label(branch({ landed: true }))).toBeNull();
+    expect(label(branch({ landed: false }))).toBe("Create PR");
+  });
+
+  it("still shows the PRs of a branch whose changes landed", () => {
+    expect(label(branch({ landed: true, prs: [pr({ state: "MERGED" })] }))).toBe("#1 · merged");
+    expect(label(branch({ landed: true }), [pr({ number: 7, state: "CLOSED" })])).toBe("#7 · closed");
+  });
+
   it("puts what needs attention first for one PR", () => {
     expect(label(branch({ prs: [pr({ checks: "failing", failing: 2, review: "changes_requested" })] }))).toBe("#1 · 2 failing");
     expect(label(branch({ prs: [pr({ review: "changes_requested", draft: true })] }))).toBe("#1 · changes requested");

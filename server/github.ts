@@ -93,6 +93,44 @@ export async function readRepo(cwd: string): Promise<string | null> {
   return parseRemote(await git(cwd, "remote", "get-url", "origin").catch(() => ""));
 }
 
+/** How far back `landedIn` looks on the base for a squash of the branch. */
+const SQUASH_SCAN = 500;
+
+/**
+ * True when the branch's changes are already in `base` though `ahead` counts its commits: they
+ * landed as a squash, or the work shipped from other branches. Two checks, because each misses
+ * what the other catches: merging HEAD changes nothing (right after a squash, before the base
+ * touches those lines again), or one base commit carries the branch's whole diff (a squash the
+ * base has since built on).
+ */
+export async function landedIn(cwd: string, base: string): Promise<boolean> {
+  // merge-tree exits non-zero on a conflict, which means the base lacks something.
+  const [merged, baseTree] = await Promise.all([
+    git(cwd, "merge-tree", "--write-tree", base, "HEAD").catch(() => ""),
+    git(cwd, "rev-parse", `${base}^{tree}`).catch(() => ""),
+  ]);
+  if (baseTree && merged.split("\n")[0] === baseTree) return true;
+  const mergeBase = await git(cwd, "merge-base", base, "HEAD").catch(() => "");
+  if (!mergeBase) return false;
+  const [branchId] = await patchIds(cwd, ["diff", mergeBase, "HEAD"]);
+  if (!branchId) return false;
+  const baseIds = await patchIds(cwd, ["log", "-p", "--no-merges", "-n", String(SQUASH_SCAN), `${mergeBase}..${base}`]);
+  return baseIds.includes(branchId);
+}
+
+/** `git patch-id --stable` of a diff-producing git command's output, one id per patch. */
+async function patchIds(cwd: string, args: string[]): Promise<string[]> {
+  const patch = await new Promise<string>((resolve) =>
+    execFile("git", args, { cwd, maxBuffer: 64 * 1024 * 1024, env: { ...process.env, PATH } }, (error, stdout) => resolve(error ? "" : stdout)),
+  );
+  if (!patch) return [];
+  const ids = await new Promise<string>((resolve) => {
+    const child = execFile("git", ["patch-id", "--stable"], { cwd, env: { ...process.env, PATH } }, (error, stdout) => resolve(error ? "" : stdout));
+    child.stdin?.end(patch);
+  });
+  return ids.split("\n").map((line) => line.split(" ")[0]).filter(Boolean);
+}
+
 const PR_FIELDS = "number,title,url,state,isDraft,reviewDecision,statusCheckRollup";
 
 const noBranch = (cwd: string, repo: string | null = null): Branch => ({ cwd, repo, branch: null, isDefault: false, ahead: 0, prs: [], stack: [] });
@@ -105,6 +143,7 @@ export async function readBranch(cwd: string, force = false): Promise<Branch> {
   const base = await defaultBranch(cwd);
   if (branch === base) return { ...none, branch, isDefault: true };
   const ahead = Number(await git(cwd, "rev-list", "--count", `origin/${base}..HEAD`).catch(() => "0")) || 0;
+  const landed = ahead > 0 && (await landedIn(cwd, `origin/${base}`));
   // A worktree's local branch can differ from the PR's head (`feat/x-1` tracking `origin/feat/x`, as checkout-pr does).
   const upstream = await git(cwd, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}").catch(() => "");
   const tracked = upstream.startsWith("origin/") ? upstream.slice("origin/".length) : "";
@@ -114,7 +153,7 @@ export async function readBranch(cwd: string, force = false): Promise<Branch> {
     gh.run(cwd, ["pr", "list", "--head", head, "--state", "all", "--limit", "20", "--json", PR_FIELDS]).then(parsePrs),
     repo ? readStack(repo, head, force) : [],
   ]);
-  return { cwd, repo, branch, isDefault: false, ahead, prs, stack };
+  return { cwd, repo, branch, isDefault: false, ahead, landed, prs, stack };
 }
 
 const EdgesSchema = z.array(z.object({ number: z.number(), headRefName: z.string(), baseRefName: z.string(), isCrossRepository: z.boolean() }));

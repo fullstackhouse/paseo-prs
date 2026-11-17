@@ -1,6 +1,6 @@
 # paseo-prs
 
-A [Paseo](https://paseo.sh) plugin: the pull requests related to a workspace, its branch's PRs plus any you or the agent link (a PR an agent opens with `gh pr create` or a `create_pull_request` MCP tool links itself when its turn ends), as a pill in each agent's composer (`PRs · 29 · 2 failing`), with a **Create PR** button when there is none, **Fork chat** to continue the conversation in a new workspace on one PR, and **Report to main** in that fork to send the outcome back to the main chat when you are done.
+A [Paseo](https://paseo.sh) plugin: the pull requests related to a workspace, its branch's PRs plus any you or the agent link (a PR an agent opens with `gh pr create` or a `create_pull_request` MCP tool links itself when its turn ends), as a pill in each agent's composer (`PRs · 29 · 2 failing`), with a **Create PR** button when there is none and the branch has changes its base lacks, **Fork chat** to continue the conversation in a new workspace on one PR, and **Report to main** in that fork to send the outcome back to the main chat when you are done.
 
 ![The PRs popover](docs/related-prs.png)
 

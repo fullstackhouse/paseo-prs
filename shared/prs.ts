@@ -22,6 +22,8 @@ export const BranchSchema = z.object({
   branch: z.string().nullable(),
   isDefault: z.boolean(),
   ahead: z.number(),
+  /** The branch's changes are already in its base (merged, squash-merged or cherry-picked): nothing left to propose. */
+  landed: z.boolean().optional(),
   prs: z.array(PrSchema),
   /** Open PRs stacked with the branch's: the chain below it and every PR built on top of it. */
   stack: z.array(PrSchema),
@@ -271,8 +273,8 @@ export function pillFor(branch: Branch | undefined, linked: readonly Pr[]): Pill
       icon: failing ? "CircleX" : "GitPullRequest",
     };
   }
-  // No PR yet: offer one only for a feature branch with commits to propose.
-  if (!branch?.branch || branch.isDefault || branch.ahead === 0) return null;
+  // No PR yet: offer one only for a feature branch with changes its base lacks.
+  if (!branch?.branch || branch.isDefault || branch.ahead === 0 || branch.landed) return null;
   return { kind: "create", label: "Create PR", icon: "GitPullRequestCreate" };
 }
 
