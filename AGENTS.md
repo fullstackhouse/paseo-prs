@@ -1,6 +1,6 @@
 # paseo-prs
 
-Paseo plugin: one composer pill per agent for the PRs related to its workspace (branch PRs ∪ their stack ∪ linked PRs); Create PR when none and the branch's changes aren't in its base yet (`landed`, via `git merge-tree`).
+Paseo plugin: one composer pill per agent for the PRs related to its workspace (branch PRs ∪ their stack ∪ linked PRs); Create PR when none and the branch's changes aren't in its base yet (`landed`: `git merge-tree` or a matching squash patch-id).
 
 ## Layout
 
