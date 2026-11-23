@@ -25,10 +25,17 @@ export const BranchSchema = z.object({
   prs: z.array(PrSchema),
   /** Open PRs stacked with the branch's: the chain below it and every PR built on top of it. */
   stack: z.array(PrSchema),
+  /** True when GitHub couldn't be read (gh signed out, offline, rate limited); `prs` and `stack` are the last read. */
+  stale: z.boolean().optional(),
 });
 export type Branch = z.infer<typeof BranchSchema>;
 
-export const WorkspaceLinksSchema = z.object({ workspaceId: z.string(), prs: z.array(PrSchema) });
+export const WorkspaceLinksSchema = z.object({
+  workspaceId: z.string(),
+  prs: z.array(PrSchema),
+  /** True when GitHub couldn't be read for some of `prs`; they are the last read. */
+  stale: z.boolean().optional(),
+});
 export type WorkspaceLinks = z.infer<typeof WorkspaceLinksSchema>;
 
 const WorkspaceRefSchema = z.object({ workspaceId: z.string(), cwd: z.string() });

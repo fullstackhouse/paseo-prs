@@ -16,6 +16,8 @@ Link a PR from the pill's popover (a PR URL, `owner/repo#123`, or `#123` in the 
 
 Pressing the pill opens a list: number, title, checks and review state per PR, open ones first. A row opens the PR on GitHub. **Fork chat** or **Open** is described below. **Review** opens the PR's review in [paseo-inbox](https://github.com/fullstackhouse/paseo-inbox): its newest review draft, or **Start review** when it has none. It shows on open PRs when paseo-inbox is installed and the Paseo host can open another plugin's screen (the FSH build). **Fix** and **Address** ask the agent to fix failing checks or address a review; they, and **Ask agent to open a PR**, are disabled while the agent is working, since a new prompt would interrupt its turn.
 
+On the FSH Paseo build, the workspace's Overview also lists these PRs at the end, under Pull requests, with the pill's most urgent fact per PR; merged and closed ones fold away. They are listed for information and never show as a move waiting on you. While GitHub can't be read, the last list stays, marked out of date.
+
 ## Fork the chat onto one PR
 
 **Fork chat** on a row creates a new workspace with that PR checked out and opens it. Its agent uses the same provider, model, mode and thinking as the current one, gets the PR and the current chat's history attached, and starts with "Focus only on PR #N". It is not a subagent of the current one; it carries a `prs.forkedFrom` label pointing back. When a live agent elsewhere is already on that PR (forked earlier, or on its branch), the row shows **Open** instead. Fork is offered for open PRs from the workspace's own repository.

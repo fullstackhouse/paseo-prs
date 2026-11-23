@@ -187,7 +187,7 @@ export async function readCheckout(cwd: string): Promise<string> {
 /**
  * Reads per working directory, shared by every client and agent in it, at most once per TTL unless forced. A branch whose
  * PRs are all merged or closed, with no stack, keeps for TERMINAL_TTL_MS while the checkout stays on it. A failed read
- * serves the previous one.
+ * serves the previous one, marked stale.
  */
 export class BranchCache {
   private readonly entries = new Map<string, { at: number; ttl: number; checkout: Promise<string>; value: Promise<Branch> }>();
@@ -217,7 +217,7 @@ export class BranchCache {
       },
       (error) => {
         if (!(error instanceof RateLimited)) console.error(`[prs] ${cwd}: ${message(error)}`);
-        return hit?.value ?? noBranch(cwd);
+        return (hit?.value ?? Promise.resolve(noBranch(cwd))).then((previous): Branch => ({ ...previous, stale: true }));
       },
     );
     this.entries.set(cwd, entry);
@@ -242,8 +242,15 @@ export const ghPrFetcher: PrFetcher = async (refs) => {
 /** Linked PR states by URL, at most once per TTL each (TERMINAL_TTL_MS once merged or closed); a batch fetches only what is missing or stale. */
 export class PrCache {
   private readonly entries = new Map<string, { at: number; pr: Pr }>();
+  /** URLs whose last fetch failed: what we serve for them is the last answer, or unavailable. */
+  private readonly failed = new Set<string>();
 
   constructor(private readonly fetch: PrFetcher = ghPrFetcher, private readonly now: () => number = Date.now) {}
+
+  /** True when GitHub couldn't be read for `ref` the last time it was due. */
+  isStale(ref: PrRef): boolean {
+    return this.failed.has(prUrl(ref));
+  }
 
   async get(refs: readonly PrRef[], force = false): Promise<Map<string, Pr>> {
     const stale = refs.filter((ref) => {
@@ -258,8 +265,11 @@ export class PrCache {
       // A failed call keeps what we had; a PR GitHub did not return shows as unavailable.
       if (fetched) {
         const at = this.now();
-        for (const ref of stale) this.entries.set(prUrl(ref), { at, pr: fetched.get(prUrl(ref)) ?? unavailable(ref) });
-      }
+        for (const ref of stale) {
+          this.entries.set(prUrl(ref), { at, pr: fetched.get(prUrl(ref)) ?? unavailable(ref) });
+          this.failed.delete(prUrl(ref));
+        }
+      } else for (const ref of stale) this.failed.add(prUrl(ref));
     }
     return new Map(refs.map((ref) => [prUrl(ref), this.entries.get(prUrl(ref))?.pr ?? unavailable(ref)]));
   }

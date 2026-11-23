@@ -35,7 +35,7 @@ function fakeGitHub(prs: Pr[]) {
     }
     return found;
   };
-  return { fetch, calls, failNext: () => (fail = true) };
+  return { fetch, calls, failNext: () => (fail = true), recover: () => (fail = false) };
 }
 
 describe("linkedPrsQuery / parseLinkedPrs", () => {
@@ -82,10 +82,13 @@ describe("PrCache", () => {
     expect(github.calls).toEqual([[one], [two, gone]]);
     expect(second.get(prUrl(gone))?.state).toBe("UNKNOWN");
 
+    expect(cache.isStale(one)).toBe(false);
+
     now = 121_000;
     github.failNext();
     const third = await cache.get([one]);
     expect(third.get(prUrl(one))?.state).toBe("OPEN");
+    expect([cache.isStale(one), cache.isStale(two)]).toEqual([true, false]);
     await cache.get([two], true);
     expect(github.calls).toHaveLength(4);
   });
@@ -161,7 +164,20 @@ describe("Links", () => {
     expect(github.calls.length).toBe(calls);
   });
 
-  it("unlinks and says what was not linked", async () => {
+  it("marks a workspace's links stale while GitHub can't be read", async () => {
+    const { links, github } = setup();
+    await links.link(workspace, ["#5"]);
+    await links.list(["w"]);
+    github.failNext();
+    expect(await links.list(["w", "empty"], true)).toEqual([
+      { workspaceId: "w", prs: [expect.objectContaining({ number: 5, state: "OPEN" })], stale: true },
+      { workspaceId: "empty", prs: [] },
+    ]);
+    github.recover();
+    expect((await links.list(["w"], true))[0]).not.toHaveProperty("stale");
+  });
+
+    it("unlinks and says what was not linked", async () => {
     const { links, store } = setup();
     await links.link(workspace, ["#5"]);
     expect(await links.unlink(workspace, ["https://github.com/org/repo/pull/5", "#6"])).toEqual({

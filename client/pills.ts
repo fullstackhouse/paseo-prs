@@ -22,6 +22,7 @@ import {
 } from "../shared/prs";
 import { makePopover, type AgentPrs, type PrsStore } from "./PrsPopover";
 import { makeReportPopover, type ForkReport, type ReportStore } from "./ReportPopover";
+import { createWorkspaceSummaries, summaryState } from "./summary";
 
 // Server reads are cached for 2 min (an hour for merged/closed PRs); this only bounds how stale a pill gets while nothing happens.
 const POLL_MS = 60_000;
@@ -60,6 +61,10 @@ export function contributePills(client: PluginClientContext, openAgent: (agentId
   const agents = new Map<string, AgentInfo>();
   const branches = new Map<string, Branch>();
   const linked = new Map<string, Pr[]>();
+  // Workspaces whose PRs couldn't be refreshed: GitHub (per the server) or the server itself.
+  const staleLinks = new Set<string>();
+  const unreachable = new Set<string>();
+  const summaries = createWorkspaceSummaries(client);
   const pills = new Map<string, PluginButtonRegistration>();
   // Forks (agents with prs.forkedFrom) get a second pill to report back to their main chat.
   const reports = new Map<string, ReportState>();
@@ -73,11 +78,20 @@ export function contributePills(client: PluginClientContext, openAgent: (agentId
     if (!workspaces.length || lifetime.signal.aborted) return;
     const forks = forkIds();
     const [result, states] = await Promise.all([
-      client.rpc(listPrs, { workspaces, force }),
+      client.rpc(listPrs, { workspaces, force }).catch((error: unknown) => {
+        for (const { workspaceId } of workspaces) unreachable.add(workspaceId);
+        renderSummaries();
+        throw error;
+      }),
       forks.length ? client.rpc(listReports, { agentIds: forks }) : Promise.resolve({ reports: {} }),
     ]);
     for (const branch of result.branches) branches.set(branch.cwd, branch);
-    for (const entry of result.links) linked.set(entry.workspaceId, entry.prs);
+    for (const entry of result.links) {
+      linked.set(entry.workspaceId, entry.prs);
+      if (entry.stale) staleLinks.add(entry.workspaceId);
+      else staleLinks.delete(entry.workspaceId);
+    }
+    for (const { workspaceId } of workspaces) unreachable.delete(workspaceId);
     applyReports(states.reports);
     // Any agent's rows can change: they point at other workspaces that are on the same PRs.
     renderAll();
@@ -193,6 +207,20 @@ export function contributePills(client: PluginClientContext, openAgent: (agentId
     else reportPills.set(agentId, client.addComposerPill({ id: "prs-report", workspaceId: agent.workspaceId, agentId, button: { ...face, behavior: reportBehavior } }));
   };
 
+  /** One Overview summary item per workspace with a live agent, once its PRs have been read. */
+  const renderSummaries = () => {
+    const cwds = new Map<string, string>();
+    for (const agent of agents.values()) if (!cwds.has(agent.workspaceId)) cwds.set(agent.workspaceId, agent.cwd);
+    for (const workspaceId of summaries.workspaceIds()) if (!cwds.has(workspaceId)) summaries.remove(workspaceId);
+    for (const [workspaceId, cwd] of cwds) {
+      const branch = branches.get(cwd);
+      // Before the first read there is nothing to say; an empty list would claim there are no PRs.
+      if (!branch || !linked.has(workspaceId)) continue;
+      const stale = Boolean(branch.stale) || staleLinks.has(workspaceId) || unreachable.has(workspaceId);
+      summaries.set(workspaceId, summaryState(branch, linked.get(workspaceId) ?? [], stale));
+    }
+  };
+
   const clear = () => {
     for (const pill of pills.values()) pill.remove();
     pills.clear();
@@ -205,6 +233,7 @@ export function contributePills(client: PluginClientContext, openAgent: (agentId
   };
   const renderAll = () => {
     for (const agentId of agents.keys()) render(agentId);
+    renderSummaries();
   };
 
   const upsert = (agent: AgentPayload) => {
@@ -221,7 +250,7 @@ export function contributePills(client: PluginClientContext, openAgent: (agentId
   const drop = (agentId: string) => {
     const known = agents.delete(agentId);
     render(agentId);
-    // Rows elsewhere may have offered Open for this agent.
+    // Rows elsewhere may have offered Open for this agent, and its workspace may have no agent left.
     if (known) renderAll();
   };
 
@@ -263,5 +292,7 @@ export function contributePills(client: PluginClientContext, openAgent: (agentId
     clearInterval(timer);
     clearInterval(reportTimer);
     clear();
+    // Kept across a new agent snapshot, which prunes them on the next render; gone only with the plugin.
+    summaries.clear();
   };
 }

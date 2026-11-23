@@ -22,6 +22,7 @@ export class Links {
     return refs.map(({ workspaceId, refs }) => ({
       workspaceId,
       prs: refs.map((ref) => prs.get(url(ref))).filter((pr): pr is Pr => Boolean(pr)),
+      ...(refs.some((ref) => this.prs.isStale(ref)) ? { stale: true } : {}),
     }));
   }
 

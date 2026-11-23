@@ -186,11 +186,13 @@ describe("BranchCache", () => {
       return branch(cwd, { prs: [pr()] });
     }, () => now);
 
-    await cache.get("/w");
+    expect((await cache.get("/w")).stale).toBeUndefined();
     limited = true;
     now = 120_000;
-    expect((await cache.get("/w")).prs).toHaveLength(1);
+    expect(await cache.get("/w")).toMatchObject({ prs: [expect.anything()], stale: true });
     expect((await cache.get("/w", true)).prs).toHaveLength(1);
-    expect((await cache.get("/never")).branch).toBeNull();
+    expect(await cache.get("/never")).toMatchObject({ branch: null, stale: true });
+    limited = false;
+    expect((await cache.get("/w", true)).stale).toBeUndefined();
   });
 });
