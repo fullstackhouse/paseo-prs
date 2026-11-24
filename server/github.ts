@@ -239,6 +239,9 @@ export const ghPrFetcher: PrFetcher = async (refs) => {
   return parseLinkedPrs(stdout, aliases);
 };
 
+/** Linked PRs per GraphQL query. Each reads up to 100 check contexts, so a big query times out. */
+export const PR_BATCH_SIZE = 25;
+
 /** Linked PR states by URL, at most once per TTL each (TERMINAL_TTL_MS once merged or closed); a batch fetches only what is missing or stale. */
 export class PrCache {
   private readonly entries = new Map<string, { at: number; pr: Pr }>();
@@ -257,19 +260,26 @@ export class PrCache {
       const hit = this.entries.get(prUrl(ref));
       return force || !hit || this.now() - hit.at >= (terminal(hit.pr) ? TERMINAL_TTL_MS : TTL_MS);
     });
-    if (stale.length) {
-      const fetched = await this.fetch(stale).catch((error) => {
-        if (!(error instanceof RateLimited)) console.error(`[prs] linked PRs: ${message(error)}`);
-        return null;
-      });
+    let rateLimited = false;
+    // One query for every linked PR across all workspaces times out on GitHub (HTTP 504) and failed
+    // them all; chunks run one after another, so a failing chunk only marks its own PRs stale.
+    for (let start = 0; start < stale.length; start += PR_BATCH_SIZE) {
+      const chunk = stale.slice(start, start + PR_BATCH_SIZE);
+      const fetched = rateLimited
+        ? null
+        : await this.fetch(chunk).catch((error) => {
+            if (error instanceof RateLimited) rateLimited = true;
+            else console.error(`[prs] linked PRs: ${message(error)}`);
+            return null;
+          });
       // A failed call keeps what we had; a PR GitHub did not return shows as unavailable.
       if (fetched) {
         const at = this.now();
-        for (const ref of stale) {
+        for (const ref of chunk) {
           this.entries.set(prUrl(ref), { at, pr: fetched.get(prUrl(ref)) ?? unavailable(ref) });
           this.failed.delete(prUrl(ref));
         }
-      } else for (const ref of stale) this.failed.add(prUrl(ref));
+      } else for (const ref of chunk) this.failed.add(prUrl(ref));
     }
     return new Map(refs.map((ref) => [prUrl(ref), this.entries.get(prUrl(ref))?.pr ?? unavailable(ref)]));
   }

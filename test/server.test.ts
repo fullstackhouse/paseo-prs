@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { PrCache, type PrFetcher } from "../server/github";
+import { PR_BATCH_SIZE, PrCache, RateLimited, type PrFetcher } from "../server/github";
 import { linkedPrsQuery, parseLinkedPrs } from "../server/graphql";
 import { Links } from "../server/links";
 import { LinkStore } from "../server/store";
@@ -91,6 +91,38 @@ describe("PrCache", () => {
     expect([cache.isStale(one), cache.isStale(two)]).toEqual([true, false]);
     await cache.get([two], true);
     expect(github.calls).toHaveLength(4);
+  });
+
+  it("fetches a large batch in chunks, so one slow or failing chunk only marks its own PRs stale", async () => {
+    const refs = Array.from({ length: 60 }, (_, i) => ({ repo: "o/r", number: i + 1 }));
+    const calls: PrRef[][] = [];
+    const fetch: PrFetcher = async (chunk) => {
+      calls.push([...chunk]);
+      if (calls.length === 2) throw new Error("HTTP 504");
+      return new Map(chunk.map((ref) => [prUrl(ref), pr(ref.repo, ref.number)]));
+    };
+    const cache = new PrCache(fetch);
+
+    const got = await cache.get(refs);
+    expect(calls.map((chunk) => chunk.length)).toEqual([PR_BATCH_SIZE, PR_BATCH_SIZE, 60 - 2 * PR_BATCH_SIZE]);
+    expect(calls.flat()).toEqual(refs);
+    const failed = new Set(calls[1]!.map(prUrl));
+    for (const ref of refs) {
+      expect(cache.isStale(ref)).toBe(failed.has(prUrl(ref)));
+      expect(got.get(prUrl(ref))?.state).toBe(failed.has(prUrl(ref)) ? "UNKNOWN" : "OPEN");
+    }
+  });
+
+  it("stops fetching the remaining chunks once GitHub rate-limits", async () => {
+    const refs = Array.from({ length: 60 }, (_, i) => ({ repo: "o/r", number: i + 1 }));
+    let calls = 0;
+    const cache = new PrCache(async () => {
+      calls++;
+      throw new RateLimited(0);
+    });
+    await cache.get(refs);
+    expect(calls).toBe(1);
+    expect(refs.every((ref) => cache.isStale(ref))).toBe(true);
   });
 
   it("keeps merged and closed PRs for an hour unless forced, and a forced read sees a reopen", async () => {
