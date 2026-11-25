@@ -125,7 +125,7 @@ describe("PrCache", () => {
     expect(refs.every((ref) => cache.isStale(ref))).toBe(true);
   });
 
-  it("keeps merged and closed PRs for an hour unless forced, and a forced read sees a reopen", async () => {
+  it("keeps closed PRs for an hour unless forced, merged ones for good, and a forced read sees a reopen", async () => {
     let now = 0;
     const backend = [pr("o/r", 1, { state: "CLOSED" }), pr("o/r", 2, { state: "MERGED" }), pr("o/r", 3)];
     const github = fakeGitHub(backend);
@@ -145,7 +145,21 @@ describe("PrCache", () => {
     expect(github.calls.slice(3)).toEqual([[refs[0], refs[2]]]);
     now = 3_700_000;
     await cache.get(refs);
-    expect(github.calls.at(-1)).toEqual(refs);
+    expect(github.calls.at(-1)).toEqual([refs[0], refs[2]]);
+  });
+
+  it("never refetches a merged PR, even when forced: its state can't change", async () => {
+    let now = 0;
+    const github = fakeGitHub([pr("o/r", 1, { state: "MERGED" }), pr("o/r", 2)]);
+    const cache = new PrCache(github.fetch, () => now);
+    const merged = { repo: "o/r", number: 1 };
+    const open = { repo: "o/r", number: 2 };
+
+    await cache.get([merged, open]);
+    now = 10 * 3_600_000;
+    await cache.get([merged, open], true);
+    expect(github.calls).toEqual([[merged, open], [open]]);
+    expect((await cache.get([merged])).get(prUrl(merged))?.state).toBe("MERGED");
   });
 });
 

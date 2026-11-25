@@ -242,7 +242,7 @@ export const ghPrFetcher: PrFetcher = async (refs) => {
 /** Linked PRs per GraphQL query. Each reads up to 100 check contexts, so a big query times out. */
 export const PR_BATCH_SIZE = 25;
 
-/** Linked PR states by URL, at most once per TTL each (TERMINAL_TTL_MS once merged or closed); a batch fetches only what is missing or stale. */
+/** Linked PR states by URL, at most once per TTL each (TERMINAL_TTL_MS once closed, never again once merged); a batch fetches only what is missing or stale. */
 export class PrCache {
   private readonly entries = new Map<string, { at: number; pr: Pr }>();
   /** URLs whose last fetch failed: what we serve for them is the last answer, or unavailable. */
@@ -258,6 +258,9 @@ export class PrCache {
   async get(refs: readonly PrRef[], force = false): Promise<Map<string, Pr>> {
     const stale = refs.filter((ref) => {
       const hit = this.entries.get(prUrl(ref));
+      // A merged PR can't change state; refetching it, even on the forced refresh after every turn, only
+      // spends rate limit. Track workspaces link dozens of them. Closed PRs can reopen, so they still expire.
+      if (hit?.pr.state === "MERGED") return false;
       return force || !hit || this.now() - hit.at >= (terminal(hit.pr) ? TERMINAL_TTL_MS : TTL_MS);
     });
     let rateLimited = false;
