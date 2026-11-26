@@ -2,8 +2,9 @@ import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { PR_BATCH_SIZE, PrCache, RateLimited, type PrFetcher } from "../server/github";
-import { linkedPrsQuery, parseLinkedPrs } from "../server/graphql";
+import { hostPrFetcher, PrCache, PrReadsUnavailable, prOf, type PrFetcher } from "../server/github";
+import type { HostChangeRequestRead } from "../server/host-sdk";
+import type { PaseoApi } from "@getpaseo/client";
 import { Links } from "../server/links";
 import { LinkStore } from "../server/store";
 import { callTool, isPrsPermission, pickCaller } from "../server/tools";
@@ -38,33 +39,62 @@ function fakeGitHub(prs: Pr[]) {
   return { fetch, calls, failNext: () => (fail = true), recover: () => (fail = false) };
 }
 
-describe("linkedPrsQuery / parseLinkedPrs", () => {
-  it("batches every ref into one query and maps the answer back by ref", () => {
-    const refs = [
-      { repo: "o/r", number: 1 },
-      { repo: "o/r", number: 2 },
-      { repo: "x/y", number: 1 },
-    ];
-    const { query, aliases } = linkedPrsQuery(refs);
-    expect(query).toContain('r0: repository(owner: "o", name: "r") { p1: pullRequest(number: 1)');
-    expect(query).toContain("p2: pullRequest(number: 2)");
-    expect(query).toContain('r1: repository(owner: "x", name: "y")');
-    const node = (number: number, contexts: unknown[]) => ({
-      number,
-      title: `T${number}`,
-      url: `https://github.com/O/R/pull/${number}`,
+describe("hostPrFetcher", () => {
+  const read = (url: string, overrides: Partial<Extract<HostChangeRequestRead, { ok: true }>> = {}): HostChangeRequestRead => ({
+    url,
+    ok: true,
+    number: 1,
+    title: "T1",
+    state: "open",
+    isDraft: false,
+    reviewDecision: "approved",
+    checksState: "failing",
+    checks: [
+      { name: "test", state: "failing" },
+      { name: "lint", state: "passing" },
+      { name: "e2e", state: "failing" },
+    ],
+    headSha: "abc",
+    ...overrides,
+  });
+
+  it("maps the host's read to the plugin's PR shape", () => {
+    expect(prOf(read("https://github.com/O/R/pull/1") as Extract<HostChangeRequestRead, { ok: true }>)).toEqual({
+      number: 1,
+      title: "T1",
+      url: "https://github.com/O/R/pull/1",
       state: "OPEN",
-      isDraft: false,
-      reviewDecision: "APPROVED",
-      commits: { nodes: [{ commit: { statusCheckRollup: { contexts: { nodes: contexts } } } }] },
+      draft: false,
+      checks: "failing",
+      failing: 2,
+      review: "approved",
     });
-    const json = JSON.stringify({
-      data: { r0: { p1: node(1, [{ status: "COMPLETED", conclusion: "FAILURE" }, { state: "SUCCESS" }]), p2: null }, r1: null },
-      errors: [{ message: "Could not resolve to a Repository" }],
-    });
-    const prs = parseLinkedPrs(json, aliases);
+    const merged = read("u", { state: "merged", reviewDecision: null, checksState: "none", checks: [] });
+    expect(prOf(merged as Extract<HostChangeRequestRead, { ok: true }>)).toMatchObject({ state: "MERGED", review: "none", checks: "none", failing: 0 });
+  });
+
+  it("reads every ref in one call and leaves out the ones the host couldn't read", async () => {
+    const calls: string[][] = [];
+    const api = {
+      changeRequests: {
+        read: async (urls: string[]) => {
+          calls.push(urls);
+          return [read(urls[0]!), { url: urls[1]!, ok: false as const, error: "Could not resolve" }];
+        },
+      },
+    } as unknown as PaseoApi;
+    const prs = await hostPrFetcher(() => api)([
+      { repo: "o/r", number: 1 },
+      { repo: "x/y", number: 2 },
+    ]);
+    expect(calls).toEqual([["https://github.com/o/r/pull/1", "https://github.com/x/y/pull/2"]]);
     expect([...prs.keys()]).toEqual(["https://github.com/o/r/pull/1"]);
-    expect(prs.get("https://github.com/o/r/pull/1")).toMatchObject({ url: "https://github.com/O/R/pull/1", review: "approved", checks: "failing", failing: 1 });
+  });
+
+  it("can't read without the host API", async () => {
+    const fetch = hostPrFetcher(() => ({}) as PaseoApi);
+    await expect(fetch([{ repo: "o/r", number: 1 }])).rejects.toThrow(PrReadsUnavailable);
+    await expect(hostPrFetcher(() => null)([{ repo: "o/r", number: 1 }])).rejects.toThrow(PrReadsUnavailable);
   });
 });
 
@@ -93,32 +123,12 @@ describe("PrCache", () => {
     expect(github.calls).toHaveLength(4);
   });
 
-  it("fetches a large batch in chunks, so one slow or failing chunk only marks its own PRs stale", async () => {
-    const refs = Array.from({ length: 60 }, (_, i) => ({ repo: "o/r", number: i + 1 }));
-    const calls: PrRef[][] = [];
-    const fetch: PrFetcher = async (chunk) => {
-      calls.push([...chunk]);
-      if (calls.length === 2) throw new Error("HTTP 504");
-      return new Map(chunk.map((ref) => [prUrl(ref), pr(ref.repo, ref.number)]));
-    };
-    const cache = new PrCache(fetch);
-
-    const got = await cache.get(refs);
-    expect(calls.map((chunk) => chunk.length)).toEqual([PR_BATCH_SIZE, PR_BATCH_SIZE, 60 - 2 * PR_BATCH_SIZE]);
-    expect(calls.flat()).toEqual(refs);
-    const failed = new Set(calls[1]!.map(prUrl));
-    for (const ref of refs) {
-      expect(cache.isStale(ref)).toBe(failed.has(prUrl(ref)));
-      expect(got.get(prUrl(ref))?.state).toBe(failed.has(prUrl(ref)) ? "UNKNOWN" : "OPEN");
-    }
-  });
-
-  it("stops fetching the remaining chunks once GitHub rate-limits", async () => {
-    const refs = Array.from({ length: 60 }, (_, i) => ({ repo: "o/r", number: i + 1 }));
+  it("marks every PR stale while the host can't read them", async () => {
+    const refs = Array.from({ length: 3 }, (_, i) => ({ repo: "o/r", number: i + 1 }));
     let calls = 0;
     const cache = new PrCache(async () => {
       calls++;
-      throw new RateLimited(0);
+      throw new PrReadsUnavailable("Host lacks changeRequests.read");
     });
     await cache.get(refs);
     expect(calls).toBe(1);
@@ -189,7 +199,7 @@ describe("Links", () => {
     const { links, store } = setup();
     const result = await links.link(workspace, ["#5 x/y#1", "#404", "nonsense"]);
     expect(result.linked).toEqual(["https://github.com/Org/Repo/pull/5", "https://github.com/x/y/pull/1"]);
-    expect(result.errors).toEqual(["nonsense: not a PR URL or #number", "org/repo#404: not found on GitHub (or gh cannot read it)"]);
+    expect(result.errors).toEqual(["nonsense: not a PR URL or #number", "org/repo#404: not found on GitHub (or Paseo cannot read it)"]);
     expect(store.list("w")).toEqual([
       { repo: "Org/Repo", number: 5 },
       { repo: "x/y", number: 1 },

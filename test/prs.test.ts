@@ -2,13 +2,11 @@ import { describe, expect, it } from "vitest";
 import {
   createPrPrompt,
   parsePrRef,
-  parsePrs,
   parseRemote,
   pillFor,
   relatedPrs,
   stackOf,
   rowDetail,
-  summarizeChecks,
   type Branch,
   type Pr,
 } from "../shared/prs";
@@ -35,43 +33,6 @@ const branch = (overrides: Partial<Branch> = {}): Branch => ({
   ...overrides,
 });
 const label = (b: Branch | undefined, linked: Pr[] = []) => pillFor(b, linked)?.label ?? null;
-
-describe("summarizeChecks", () => {
-  it("reads CheckRuns and StatusContexts", () => {
-    expect(summarizeChecks([])).toEqual({ checks: "none", failing: 0 });
-    expect(summarizeChecks([{ status: "COMPLETED", conclusion: "SUCCESS" }, { state: "SUCCESS" }])).toEqual({ checks: "passing", failing: 0 });
-    expect(summarizeChecks([{ status: "IN_PROGRESS", conclusion: "" }, { state: "SUCCESS" }])).toEqual({ checks: "pending", failing: 0 });
-    expect(summarizeChecks([{ status: "COMPLETED", conclusion: "FAILURE" }, { state: "ERROR" }, { status: "QUEUED" }])).toEqual({
-      checks: "failing",
-      failing: 2,
-    });
-    expect(summarizeChecks([{ status: "COMPLETED", conclusion: "SKIPPED" }, { status: "COMPLETED", conclusion: "NEUTRAL" }]).checks).toBe("passing");
-  });
-
-  it("accepts GraphQL nulls and empty objects", () => {
-    expect(summarizeChecks([{ status: "IN_PROGRESS", conclusion: null }, {}])).toEqual({ checks: "pending", failing: 0 });
-    expect(summarizeChecks(null)).toEqual({ checks: "none", failing: 0 });
-  });
-});
-
-describe("parsePrs", () => {
-  it("maps gh JSON", () => {
-    const json = JSON.stringify([
-      {
-        number: 545,
-        title: "fix: x",
-        url: "https://github.com/o/r/pull/545",
-        state: "OPEN",
-        isDraft: true,
-        reviewDecision: "CHANGES_REQUESTED",
-        statusCheckRollup: [{ __typename: "CheckRun", status: "COMPLETED", conclusion: "FAILURE" }],
-      },
-    ]);
-    expect(parsePrs(json)).toEqual([
-      { number: 545, title: "fix: x", url: "https://github.com/o/r/pull/545", state: "OPEN", draft: true, review: "changes_requested", checks: "failing", failing: 1 },
-    ]);
-  });
-});
 
 describe("parsePrRef", () => {
   it("reads URLs, owner/repo#n and #n", () => {

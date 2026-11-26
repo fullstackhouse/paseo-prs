@@ -83,59 +83,6 @@ export const fixChecksPrompt = (pr: Pr) => `PR #${pr.number} (${pr.url}) has fai
 export const addressReviewPrompt = (pr: Pr) =>
   `PR #${pr.number} (${pr.url}) has changes requested. Address the review comments and push.`;
 
-// gh's statusCheckRollup mixes CheckRun (status + conclusion) and StatusContext (state) entries; GraphQL sends nulls.
-const RollupSchema = z.array(
-  z.object({ status: z.string().nullish(), conclusion: z.string().nullish(), state: z.string().nullish() }).passthrough(),
-);
-const FAILED = new Set(["FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE"]);
-const PENDING = new Set(["PENDING", "EXPECTED", "QUEUED", "IN_PROGRESS", "WAITING", "REQUESTED"]);
-
-export function summarizeChecks(rollup: unknown): Pick<Pr, "checks" | "failing"> {
-  const entries = RollupSchema.catch([]).parse(rollup ?? []);
-  if (entries.length === 0) return { checks: "none", failing: 0 };
-  let failing = 0;
-  let pending = 0;
-  for (const entry of entries) {
-    const result = (entry.conclusion || entry.state || "").toUpperCase();
-    const status = (entry.status ?? "").toUpperCase();
-    if (FAILED.has(result)) failing++;
-    else if (PENDING.has(result) || (status && status !== "COMPLETED")) pending++;
-  }
-  return { checks: failing ? "failing" : pending ? "pending" : "passing", failing };
-}
-
-const GhPrSchema = z.object({
-  number: z.number(),
-  title: z.string(),
-  url: z.string(),
-  state: z.enum(["OPEN", "MERGED", "CLOSED"]),
-  isDraft: z.boolean(),
-  reviewDecision: z.string().nullable().optional(),
-  statusCheckRollup: z.unknown().optional(),
-});
-type GhPr = z.infer<typeof GhPrSchema>;
-
-const REVIEWS: Record<string, Pr["review"]> = {
-  APPROVED: "approved",
-  CHANGES_REQUESTED: "changes_requested",
-  REVIEW_REQUIRED: "review_required",
-};
-
-const toPr = (pr: GhPr): Pr => ({
-  number: pr.number,
-  title: pr.title,
-  url: pr.url,
-  state: pr.state,
-  draft: pr.isDraft,
-  review: REVIEWS[pr.reviewDecision ?? ""] ?? "none",
-  ...summarizeChecks(pr.statusCheckRollup),
-});
-
-/** Parses `gh pr list --json number,title,url,state,isDraft,reviewDecision,statusCheckRollup`. */
-export function parsePrs(json: string): Pr[] {
-  return z.array(GhPrSchema).parse(JSON.parse(json)).map(toPr);
-}
-
 /** A PR on GitHub, by repository and number. */
 export interface PrRef {
   repo: string;

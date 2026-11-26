@@ -33,7 +33,7 @@ export class Links {
     const valid: PrRef[] = [];
     for (const ref of refs) {
       const pr = found.get(url(ref));
-      if (!pr || pr.state === "UNKNOWN") errors.push(`${ref.repo}#${ref.number}: not found on GitHub (or gh cannot read it)`);
+      if (!pr || pr.state === "UNKNOWN") errors.push(`${ref.repo}#${ref.number}: not found on GitHub (or Paseo cannot read it)`);
       else valid.push(canonical(pr) ?? ref);
     }
     this.store.link(workspaceId, valid);
