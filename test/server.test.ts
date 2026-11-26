@@ -1,8 +1,8 @@
 import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
-import { hostPrFetcher, PrCache, PrReadsUnavailable, prOf, type PrFetcher } from "../server/github";
+import { describe, expect, it, vi } from "vitest";
+import { hostPrFetcher, PrCache, PrReadsPaused, PrReadsUnavailable, prOf, type PrFetcher } from "../server/github";
 import type { HostChangeRequestRead } from "../server/host-sdk";
 import type { PaseoApi } from "@getpaseo/client";
 import { Links } from "../server/links";
@@ -91,6 +91,28 @@ describe("hostPrFetcher", () => {
     expect([...prs.keys()]).toEqual(["https://github.com/o/r/pull/1"]);
   });
 
+  it("fails the read while the host is paused, logging once per pause", async () => {
+    let retryAt = 5_000;
+    const api = {
+      changeRequests: {
+        read: async (urls: string[]) => urls.map((url) => ({ url, ok: false as const, error: "Paused", reason: "paused" as const, retryAt })),
+      },
+    } as unknown as PaseoApi;
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const fetch = hostPrFetcher(() => api);
+      const refs = [{ repo: "o/r", number: 1 }];
+      await expect(fetch(refs)).rejects.toThrow(PrReadsPaused);
+      await expect(fetch(refs)).rejects.toThrow(PrReadsPaused);
+      expect(log).toHaveBeenCalledTimes(1);
+      retryAt = 9_000;
+      await expect(fetch(refs)).rejects.toMatchObject({ retryAt: 9_000 });
+      expect(log).toHaveBeenCalledTimes(2);
+    } finally {
+      log.mockRestore();
+    }
+  });
+
   it("can't read without the host API", async () => {
     const fetch = hostPrFetcher(() => ({}) as PaseoApi);
     await expect(fetch([{ repo: "o/r", number: 1 }])).rejects.toThrow(PrReadsUnavailable);
@@ -133,6 +155,23 @@ describe("PrCache", () => {
     await cache.get(refs);
     expect(calls).toBe(1);
     expect(refs.every((ref) => cache.isStale(ref))).toBe(true);
+  });
+
+  it("keeps the last state, marked stale, while the host is paused", async () => {
+    let now = 0;
+    const github = fakeGitHub([pr("o/r", 1, { checks: "pending" })]);
+    let paused = false;
+    const cache = new PrCache(async (refs) => {
+      if (paused) throw new PrReadsPaused(10_000);
+      return github.fetch(refs);
+    }, () => now);
+    const one = { repo: "o/r", number: 1 };
+    await cache.get([one]);
+    paused = true;
+    now = 121_000;
+    const during = await cache.get([one]);
+    expect(during.get(prUrl(one))).toMatchObject({ state: "OPEN", checks: "pending" });
+    expect(cache.isStale(one)).toBe(true);
   });
 
   it("keeps closed PRs for an hour unless forced, merged ones for good, and a forced read sees a reopen", async () => {

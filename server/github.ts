@@ -246,8 +246,19 @@ export type PrFetcher = (refs: readonly PrRef[]) => Promise<Map<string, Pr>>;
 /** No PR state can be read: no daemon session yet, or a host older than `changeRequests.read`. */
 export class PrReadsUnavailable extends Error {}
 
+/**
+ * The host holds GitHub reads to stay under the rate limit until `retryAt`. The pause covers every PR on the host, so
+ * the caches keep what they have, marked stale, rather than showing PRs as unknown.
+ */
+export class PrReadsPaused extends Error {
+  constructor(readonly retryAt: number | undefined) {
+    super(`Paseo paused GitHub reads${retryAt ? ` until ${new Date(retryAt).toISOString()}` : ""}`);
+  }
+}
+
 /** Expected while GitHub or the host can't be read; the caches serve what they have without logging each read. */
-const quiet = (error: unknown) => error instanceof RateLimited || error instanceof PrReadsUnavailable;
+const quiet = (error: unknown) =>
+  error instanceof RateLimited || error instanceof PrReadsUnavailable || error instanceof PrReadsPaused;
 
 const REVIEWS: Record<string, Pr["review"]> = {
   approved: "approved",
@@ -271,10 +282,13 @@ export function prOf(read: Extract<HostChangeRequestRead, { ok: true }>): Pr {
 
 /**
  * PR state from the host (`paseo.changeRequests.read`), which reads every plugin's PRs through one batched reader with
- * one rate-limit pause. Older hosts lack it: reads fail with `PrReadsUnavailable`, logged once.
+ * one rate-limit pause. Older hosts lack it: reads fail with `PrReadsUnavailable`, logged once. While the host is
+ * paused, reads fail with `PrReadsPaused`, logged once per pause, so the caches keep their last state marked stale.
  */
 export function hostPrFetcher(paseo: () => PaseoApi | null): PrFetcher {
   let warned = false;
+  // The pause last logged, so a pause is logged once however many reads hit it.
+  let loggedPause: number | undefined | null = null;
   return async (refs) => {
     if (!refs.length) return new Map();
     const api = paseo();
@@ -285,6 +299,13 @@ export function hostPrFetcher(paseo: () => PaseoApi | null): PrFetcher {
       throw new PrReadsUnavailable("Host lacks changeRequests.read");
     }
     const results = await api.changeRequests.read(refs.map(prUrl));
+    const paused = results.find((read) => !read.ok && read.reason === "paused");
+    if (paused && !paused.ok) {
+      const error = new PrReadsPaused(paused.retryAt);
+      if (loggedPause !== paused.retryAt) console.error(`[prs] ${error.message}; showing the last known PR state`);
+      loggedPause = paused.retryAt;
+      throw error;
+    }
     const prs = new Map<string, Pr>();
     // One result per URL, in request order.
     refs.forEach((ref, index) => {

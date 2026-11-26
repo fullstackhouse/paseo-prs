@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { BranchCache, EdgeCache, Gh, isRateLimit, RateLimited } from "../server/github";
+import { BranchCache, EdgeCache, Gh, isRateLimit, PrReadsPaused, RateLimited } from "../server/github";
 import type { Branch, Pr, PrEdge } from "../shared/prs";
 
 const pr = (overrides: Partial<Pr> = {}): Pr => ({
@@ -194,5 +194,19 @@ describe("BranchCache", () => {
     expect(await cache.get("/never")).toMatchObject({ branch: null, stale: true });
     limited = false;
     expect((await cache.get("/w", true)).stale).toBeUndefined();
+  });
+
+  it("keeps the branch's last PR state, marked stale, while the host pauses reads", async () => {
+    let now = 0;
+    let paused = false;
+    const cache = new BranchCache(async (cwd) => {
+      if (paused) throw new PrReadsPaused(10_000);
+      return branch(cwd, { prs: [pr()] });
+    }, () => now);
+
+    await cache.get("/w");
+    paused = true;
+    now = 120_000;
+    expect(await cache.get("/w")).toMatchObject({ prs: [{ state: "OPEN" }], stale: true });
   });
 });
