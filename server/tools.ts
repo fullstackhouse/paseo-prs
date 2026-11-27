@@ -24,6 +24,31 @@ export const TOOLS = [
 
 export const PREAPPROVED: McpToolRef[] = TOOLS.map((tool) => ({ kind: "mcp", server: MCP_SERVER, tool: tool.name }));
 
+/**
+ * Providers whose Paseo adapter enforces exact MCP tool grants. Paseo rejects `toolPolicy` for any other
+ * provider ("cannot preapprove exact MCP tools"), which would fail creating every Copilot, Pi, ACP,
+ * Antigravity or Muse agent. Paseo doesn't tell plugins which providers these are yet, so the list
+ * mirrors the host's adapters; elsewhere the tools still attach and `agent.permission_requested` answers them.
+ */
+const EXACT_GRANT_PROVIDERS = new Set(["claude", "codex", "opencode"]);
+
+export function supportsExactToolGrants(provider: string): boolean {
+  return EXACT_GRANT_PROVIDERS.has(provider.split("/")[0] ?? provider);
+}
+
+interface AgentToolConfig {
+  provider: string;
+  mcpServers?: Record<string, unknown>;
+  toolPolicy?: { preapproved: McpToolRef[] };
+}
+
+/** Attaches the prs MCP server, and preapproves its tools where the provider can hold an exact grant. */
+export function withPrsTools<T extends AgentToolConfig>(config: T, mcp: unknown): T & Pick<AgentToolConfig, "toolPolicy"> {
+  const attached = { ...config, mcpServers: { ...config.mcpServers, [MCP_SERVER]: mcp } };
+  if (!supportsExactToolGrants(config.provider)) return attached;
+  return { ...attached, toolPolicy: { preapproved: [...(config.toolPolicy?.preapproved ?? []), ...PREAPPROVED] } };
+}
+
 export interface ToolResult {
   text: string;
   isError?: boolean;
