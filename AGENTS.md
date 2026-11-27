@@ -20,7 +20,7 @@ Paseo plugin: one composer pill per agent for the PRs related to its workspace (
 - Menus can't hold inputs, hence the popover.
 - `tsconfig.json` needs `"react-native"` in `types` for `setInterval`/`AbortController`/`console` in a `.ts` client file.
 - The plugin subprocess may lack the shell PATH; `server/github.ts` appends Homebrew paths.
-- MCP tools are injected in `before("agent.create")` with `toolPolicy.preapproved`; plan mode and Codex still prompt, so `agent.permission_requested` allows `mcp__prs__*`.
+- MCP tools are injected in `before("agent.create")`, with `toolPolicy.preapproved` only where the host's provider snapshot says `supportsToolPolicy` (`server/tool-grants.ts`; Claude, Codex and OpenCode on hosts that don't report it). Plan mode, Codex and grant-less providers still prompt, so `agent.permission_requested` allows the prs tools, matched on the host's `tool.server` (`mcp__prs__*` on older hosts).
 - checkout-pr worktrees get a local branch that may differ from the PR head (`feat/x-1` tracking `origin/feat/x`); `readBranch` lists PRs by the upstream branch.
 - Fork with the resolved model (`runtimeInfo.model`, e.g. `claude-haiku-5-5`), not the snapshot's alias (`haiku`), or the new agent loses its thinking options.
 - Agent-to-agent messages are core's: a plugin `send` with `sourceAgentId` gets the same envelope and queue as `send_agent_prompt`. Omitting `activeTurnBehavior` interrupts a running turn. Forks have no `parent`: core would report every finished turn of a child to it.

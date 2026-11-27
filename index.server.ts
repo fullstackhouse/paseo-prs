@@ -9,6 +9,7 @@ import { listen } from "./server/listener";
 import { Reports, ReportStore } from "./server/reports";
 import { dataDir, LinkStore } from "./server/store";
 import { callTool, INSTRUCTIONS, isPrsPermission, pickCaller, TOOLS, withPrsTools } from "./server/tools";
+import { toolGrantSupport } from "./server/tool-grants";
 import { forkPr, linkPrs, listPrs, listReports, reportPr, unlinkPrs } from "./shared/prs";
 
 export default function contribute(server: PluginServerContext) {
@@ -43,14 +44,19 @@ export default function contribute(server: PluginServerContext) {
     return handle.workspaceId && handle.cwd ? { workspaceId: handle.workspaceId, cwd: handle.cwd } : null;
   };
 
-  server.before("agent.create", ({ request }, { paseo: api }) => {
+  const exactGrants = toolGrantSupport(async () => {
+    if (!paseo) throw new Error("no daemon session yet");
+    return paseo.providers.snapshot();
+  });
+  server.before("agent.create", async ({ request }, { paseo: api }) => {
     capture(api);
-    return { ...request, config: withPrsTools(request.config, mcp) };
+    return { ...request, config: withPrsTools(request.config, mcp, await exactGrants(request.config.provider)) };
   });
   // Plan mode and Codex prompt even for preapproved MCP tools. These only touch the PR list, so allow them here.
-  server.on("agent.permission_requested", async ({ agent, request }, { paseo: api }) => {
+  server.on("agent.permission_requested", async (event, { paseo: api }) => {
+    const { agent, request } = event;
     capture(api);
-    if (!isPrsPermission(request)) return;
+    if (!isPrsPermission(request, (event as { tool?: { server: string } }).tool)) return;
     await api.agents.ref(agent.id).respondToPermission({ requestId: request.id, response: { behavior: "allow" } });
   });
 
