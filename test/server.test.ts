@@ -2,7 +2,9 @@ import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { coalescingFetcher, hostPrFetcher, PrCache, PrReadsPaused, PrReadsUnavailable, prOf, type PrFetcher } from "../server/github";
+import { PrFollows, prOf } from "../server/follows";
+import { hostPrFetcher, PrReadsPaused, PrReadsUnavailable, type PrFetcher } from "../server/github";
+import { fakeHost, read as hostRead } from "./fake-host";
 import type { HostChangeRequestRead } from "../server/host-sdk";
 import type { PaseoApi } from "@getpaseo/client";
 import { Links } from "../server/links";
@@ -120,98 +122,6 @@ describe("hostPrFetcher", () => {
   });
 });
 
-describe("PrCache", () => {
-  it("fetches only stale refs, in one batch, and keeps the last answer when GitHub fails", async () => {
-    let now = 0;
-    const github = fakeGitHub([pr("o/r", 1), pr("o/r", 2)]);
-    const cache = new PrCache(github.fetch, () => now);
-    const one = { repo: "o/r", number: 1 };
-    const two = { repo: "o/r", number: 2 };
-    const gone = { repo: "o/r", number: 3 };
-
-    await cache.get([one]);
-    const second = await cache.get([one, two, gone]);
-    expect(github.calls).toEqual([[one], [two, gone]]);
-    expect(second.get(prUrl(gone))?.state).toBe("UNKNOWN");
-
-    expect(cache.isStale(one)).toBe(false);
-
-    now = 121_000;
-    github.failNext();
-    const third = await cache.get([one]);
-    expect(third.get(prUrl(one))?.state).toBe("OPEN");
-    expect([cache.isStale(one), cache.isStale(two)]).toEqual([true, false]);
-    await cache.get([two], true);
-    expect(github.calls).toHaveLength(4);
-  });
-
-  it("marks every PR stale while the host can't read them", async () => {
-    const refs = Array.from({ length: 3 }, (_, i) => ({ repo: "o/r", number: i + 1 }));
-    let calls = 0;
-    const cache = new PrCache(async () => {
-      calls++;
-      throw new PrReadsUnavailable("Host lacks changeRequests.read");
-    });
-    await cache.get(refs);
-    expect(calls).toBe(1);
-    expect(refs.every((ref) => cache.isStale(ref))).toBe(true);
-  });
-
-  it("keeps the last state, marked stale, while the host is paused", async () => {
-    let now = 0;
-    const github = fakeGitHub([pr("o/r", 1, { checks: "pending" })]);
-    let paused = false;
-    const cache = new PrCache(async (refs) => {
-      if (paused) throw new PrReadsPaused(10_000);
-      return github.fetch(refs);
-    }, () => now);
-    const one = { repo: "o/r", number: 1 };
-    await cache.get([one]);
-    paused = true;
-    now = 121_000;
-    const during = await cache.get([one]);
-    expect(during.get(prUrl(one))).toMatchObject({ state: "OPEN", checks: "pending" });
-    expect(cache.isStale(one)).toBe(true);
-  });
-
-  it("keeps closed PRs for an hour unless forced, merged ones for good, and a forced read sees a reopen", async () => {
-    let now = 0;
-    const backend = [pr("o/r", 1, { state: "CLOSED" }), pr("o/r", 2, { state: "MERGED" }), pr("o/r", 3)];
-    const github = fakeGitHub(backend);
-    const cache = new PrCache(github.fetch, () => now);
-    const refs = [1, 2, 3].map((number) => ({ repo: "o/r", number }));
-
-    await cache.get(refs);
-    now = 121_000;
-    await cache.get(refs);
-    expect(github.calls).toEqual([refs, [refs[2]]]);
-
-    // A new object, so the cached copy stays CLOSED and only the forced read can see the reopen.
-    backend[0] = pr("o/r", 1);
-    expect((await cache.get([refs[0]!], true)).get(prUrl(refs[0]!))?.state).toBe("OPEN");
-    now = 242_000;
-    await cache.get(refs);
-    expect(github.calls.slice(3)).toEqual([[refs[0], refs[2]]]);
-    now = 3_700_000;
-    await cache.get(refs);
-    expect(github.calls.at(-1)).toEqual([refs[0], refs[2]]);
-  });
-
-  it("never refetches a merged PR, even when forced: its state can't change", async () => {
-    let now = 0;
-    const github = fakeGitHub([pr("o/r", 1, { state: "MERGED" }), pr("o/r", 2)]);
-    const cache = new PrCache(github.fetch, () => now);
-    const merged = { repo: "o/r", number: 1 };
-    const open = { repo: "o/r", number: 2 };
-
-    await cache.get([merged, open]);
-    now = 10 * 3_600_000;
-    await cache.get([merged, open], true);
-    expect(github.calls).toEqual([[merged, open], [open]]);
-    expect((await cache.get([merged])).get(prUrl(merged))?.state).toBe("MERGED");
-  });
-});
-
 describe("LinkStore", () => {
   it("links once per PR (case-insensitively), unlinks, and persists", () => {
     const dir = mkdtempSync(join(tmpdir(), "prs-"));
@@ -226,11 +136,12 @@ describe("LinkStore", () => {
 });
 
 describe("Links", () => {
+  const URLS = ["https://github.com/Org/Repo/pull/5", "https://github.com/Org/Repo/pull/6", "https://github.com/x/y/pull/1"];
   const setup = () => {
-    const github = fakeGitHub([pr("Org/Repo", 5), pr("Org/Repo", 6, { state: "MERGED" }), pr("x/y", 1)]);
+    const host = fakeHost({ reads: [hostRead(URLS[0]!), hostRead(URLS[1]!, { state: "merged" }), hostRead(URLS[2]!)] });
     const store = new LinkStore(mkdtempSync(join(tmpdir(), "prs-")));
-    const links = new Links(store, new PrCache(github.fetch), async () => "org/repo");
-    return { links, store, github };
+    const links = new Links(store, new PrFollows(() => host.api), hostPrFetcher(() => host.api), async () => "org/repo");
+    return { links, store, host };
   };
   const workspace = { workspaceId: "w", cwd: "/w" };
 
@@ -245,59 +156,47 @@ describe("Links", () => {
     ]);
   });
 
-  it("lists linked PRs per workspace with one fetch", async () => {
-    const { links, github } = setup();
-    await links.link(workspace, ["https://github.com/Org/Repo/pull/5", "https://github.com/Org/Repo/pull/6"]);
+  it("lists linked PRs per workspace from subscriptions, without reading them", async () => {
+    const { links, host } = setup();
+    await links.link(workspace, [URLS[0]!, URLS[1]!]);
     await links.link({ workspaceId: "v", cwd: "/v" }, ["x/y#1"]);
-    const calls = github.calls.length;
+    const reads = host.readCalls.length;
     const listed = await links.list(["w", "v", "empty"]);
-    expect(listed.map((entry) => [entry.workspaceId, entry.prs.map((p) => p.number)])).toEqual([
-      ["w", [5, 6]],
-      ["v", [1]],
+    expect(listed.map((entry) => [entry.workspaceId, entry.prs.map((p) => [p.number, p.state])])).toEqual([
+      ["w", [[5, "OPEN"], [6, "MERGED"]]],
+      ["v", [[1, "OPEN"]]],
       ["empty", []],
     ]);
-    expect(github.calls.length).toBe(calls);
+    expect(host.readCalls.length).toBe(reads);
+    expect(host.subscriptions.every((subscription) => subscription.target.priority === "visible")).toBe(true);
   });
 
-  it("marks a workspace's links stale while GitHub can't be read", async () => {
-    const { links, github } = setup();
+  it("marks a workspace's links stale while the host pauses reads, keeping the last state", async () => {
+    const { links, host } = setup();
     await links.link(workspace, ["#5"]);
     await links.list(["w"]);
-    github.failNext();
-    expect(await links.list(["w", "empty"], true)).toEqual([
+    host.push([{ url: URLS[0]!, ok: false, error: "Paused", reason: "paused", retryAt: 10_000 }]);
+    expect(await links.list(["w", "empty"])).toEqual([
       { workspaceId: "w", prs: [expect.objectContaining({ number: 5, state: "OPEN" })], stale: true },
       { workspaceId: "empty", prs: [] },
     ]);
-    github.recover();
-    expect((await links.list(["w"], true))[0]).not.toHaveProperty("stale");
+    host.push([hostRead(URLS[0]!)]);
+    expect((await links.list(["w"]))[0]).not.toHaveProperty("stale");
   });
 
-  it("links a PR it can't read while reads are paused, marked stale, and reads it once they resume", async () => {
-    const github = fakeGitHub([pr("Org/Repo", 7)]);
+  it("links a PR it can't read while reads are paused, and rejects a missing one once they resume", async () => {
+    const host = fakeHost({ reads: [hostRead(URLS[0]!)] });
     let paused = true;
-    const store = new LinkStore(mkdtempSync(join(tmpdir(), "prs-")));
-    const cache = new PrCache(async (refs) => {
+    const fetch: PrFetcher = async (refs) => {
       if (paused) throw new PrReadsPaused(10_000);
-      return github.fetch(refs);
-    });
-    const links = new Links(store, cache, async () => "org/repo");
+      return hostPrFetcher(() => host.api)(refs);
+    };
+    const store = new LinkStore(mkdtempSync(join(tmpdir(), "prs-")));
+    const links = new Links(store, new PrFollows(() => host.api), fetch, async () => "org/repo");
 
-    const result = await links.link(workspace, ["https://github.com/Org/Repo/pull/7", "#404"]);
-    expect(result).toEqual({ linked: ["https://github.com/Org/Repo/pull/7", "https://github.com/org/repo/pull/404"], errors: [] });
-    expect(store.list("w")).toEqual([
-      { repo: "Org/Repo", number: 7 },
-      { repo: "org/repo", number: 404 },
-    ]);
-    expect((await links.list(["w"]))[0]).toMatchObject({ stale: true });
-
+    const result = await links.link(workspace, [URLS[0]!, "#404"]);
+    expect(result).toEqual({ linked: [URLS[0], "https://github.com/org/repo/pull/404"], errors: [] });
     paused = false;
-    const [after] = await links.list(["w"], true);
-    expect(after).not.toHaveProperty("stale");
-    expect(after?.prs.map((entry) => [entry.number, entry.state])).toEqual([
-      [7, "OPEN"],
-      [404, "UNKNOWN"],
-    ]);
-    // Once reads work again, a PR GitHub doesn't have is rejected as before.
     expect((await links.link(workspace, ["#405"])).errors).toEqual(["org/repo#405: not found on GitHub (or Paseo cannot read it)"]);
   });
 
@@ -346,39 +245,6 @@ describe("tool plumbing", () => {
     expect(pickCaller(agents, "/w")).toBe("a");
     expect(pickCaller(agents, "/v/")).toBe("c");
     expect(pickCaller([...agents, { id: "d", cwd: "/w", status: "running" }], "/w")).toBeNull();
-  });
-});
-
-describe("coalescingFetcher", () => {
-  const pr = (repo: string, number: number) => ({ number, title: "t", url: `https://github.com/${repo}/pull/${number}`, state: "OPEN" as const, draft: false, checks: "none" as const, failing: 0, review: "none" as const });
-
-  it("sends reads asked for together to the host as one, each ref once", async () => {
-    const calls: string[][] = [];
-    const fetch = coalescingFetcher(async (refs) => {
-      calls.push(refs.map((ref) => `${ref.repo}#${ref.number}`));
-      return new Map(refs.map((ref) => [`https://github.com/${ref.repo}/pull/${ref.number}`, pr(ref.repo, ref.number)]));
-    }, 5);
-    const [a, b] = await Promise.all([fetch([{ repo: "o/r", number: 1 }]), fetch([{ repo: "o/r", number: 1 }, { repo: "o/s", number: 2 }])]);
-    expect(calls).toEqual([["o/r#1", "o/s#2"]]);
-    expect(a.get("https://github.com/o/r/pull/1")?.number).toBe(1);
-    expect(b.get("https://github.com/o/s/pull/2")?.number).toBe(2);
-    await fetch([{ repo: "o/r", number: 3 }]);
-    expect(calls).toHaveLength(2);
-  });
-
-  it("fails every read in the batch when the host read fails", async () => {
-    const fetch = coalescingFetcher(async () => {
-      throw new PrReadsPaused(5_000);
-    }, 5);
-    const reads = [fetch([{ repo: "o/r", number: 1 }]), fetch([{ repo: "o/r", number: 2 }])];
-    for (const read of reads) await expect(read).rejects.toThrow(PrReadsPaused);
-  });
-
-  it("answers an empty read without the host", async () => {
-    let called = false;
-    const fetch = coalescingFetcher(async () => ((called = true), new Map()), 5);
-    expect((await fetch([])).size).toBe(0);
-    expect(called).toBe(false);
   });
 });
 

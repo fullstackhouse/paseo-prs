@@ -3,24 +3,37 @@ import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { AutoLinker } from "./server/autolink";
 import { installBridge } from "./server/bridge";
 import { forkIntoPr } from "./server/fork";
-import { BranchCache, branchReader, coalescingFetcher, hostPrFetcher, PrCache, readPrDetails } from "./server/github";
+import { ChangeFeed } from "./server/changes";
+import { PrFollows } from "./server/follows";
+import { hostPrFetcher, readBranch, readPrDetails } from "./server/github";
 import { Links, type WorkspaceRef } from "./server/links";
 import { listen } from "./server/listener";
 import { Reports, ReportStore } from "./server/reports";
 import { dataDir, LinkStore } from "./server/store";
 import { callTool, INSTRUCTIONS, isPrsPermission, pickCaller, TOOLS, withPrsTools } from "./server/tools";
 import { toolGrantSupport } from "./server/tool-grants";
+import { prChanges, type PrChangesEvent } from "./shared/changes";
 import { forkPr, linkPrs, listPrs, listReports, reportPr, unlinkPrs } from "./shared/prs";
+
+/** COMPAT(pluginSubscriptions): the npm SDK pin types only RPC handlers. */
+type SubscriptionHandle = (
+  contract: typeof prChanges,
+  handler: (input: Record<string, never>, context: { push: (event: PrChangesEvent) => Promise<unknown>; signal: AbortSignal }) => void,
+) => void;
+
+// Subscriptions no client asked about lately are dropped this often.
+const PRUNE_MS = 5 * 60_000;
 
 export default function contribute(server: PluginServerContext) {
   const dir = dataDir();
   const mcp = installBridge(dir);
   // The daemon session behind `paseo` lives as long as this subprocess; any hook or handler hands it over.
   let paseo: PaseoApi | null = null;
-  // PR state comes from the host; gh only finds which PRs a branch and its stack have.
-  const fetchPrs = coalescingFetcher(hostPrFetcher(() => paseo));
-  const branches = new BranchCache(branchReader(fetchPrs));
-  const links = new Links(new LinkStore(dir), new PrCache(fetchPrs));
+  // PR state comes from the host's PR service, pushed; gh only lists a repo's open PRs for stacks.
+  const changes = new ChangeFeed();
+  const follows = new PrFollows(() => paseo, () => changes.notify());
+  const links = new Links(new LinkStore(dir), follows, hostPrFetcher(() => paseo));
+  const pruning = setInterval(() => void follows.prune(), PRUNE_MS);
   const capture = (api: PaseoApi) => {
     paseo ??= api;
   };
@@ -77,9 +90,11 @@ export default function contribute(server: PluginServerContext) {
     capture(api);
     const cwds = [...new Set(workspaces.map((workspace) => workspace.cwd))];
     const workspaceIds = [...new Set(workspaces.map((workspace) => workspace.workspaceId))];
-    const [read, linked] = await Promise.all([Promise.all(cwds.map((cwd) => branches.get(cwd, force))), links.list(workspaceIds, force)]);
+    const [read, linked] = await Promise.all([Promise.all(cwds.map((cwd) => readBranch(cwd, force === true, follows))), links.list(workspaceIds)]);
     return { branches: read, links: linked };
   });
+  // COMPAT(pluginSubscriptions): hosts from Paseo 0.15 serve this contract (it has `event`) as a subscription.
+  (server.handle as unknown as SubscriptionHandle).call(server, prChanges, (_input, { push, signal }) => changes.serve(push, signal));
   server.handle(linkPrs, ({ refs, ...workspace }, { paseo: api }) => {
     capture(api);
     return links.link(workspace, refs);
@@ -111,6 +126,8 @@ export default function contribute(server: PluginServerContext) {
   });
 
   return async () => {
+    clearInterval(pruning);
+    await follows.close();
     (await listening).close();
   };
 }

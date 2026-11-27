@@ -1,5 +1,6 @@
 import { parsePrRef, prStatus, prUrl as url, type LinkResult, type Pr, type PrRef, type WorkspaceLinks } from "../shared/prs";
-import { readRepo, type PrCache } from "./github";
+import type { PrFollows } from "./follows";
+import { readRepo, type PrFetcher } from "./github";
 import type { LinkStore } from "./store";
 
 export interface WorkspaceRef {
@@ -11,18 +12,20 @@ export interface WorkspaceRef {
 export class Links {
   constructor(
     private readonly store: LinkStore,
-    private readonly prs: PrCache,
+    private readonly follows: PrFollows,
+    /** One-shot reads, to check a PR exists before linking it. */
+    private readonly fetch: PrFetcher,
     private readonly repoOf: (cwd: string) => Promise<string | null> = readRepo,
   ) {}
 
-  /** Each workspace's linked PRs, fetched in one batch across workspaces. */
-  async list(workspaceIds: readonly string[], force = false): Promise<WorkspaceLinks[]> {
+  /** Each workspace's linked PRs, as the host's PR service last pushed them (shown on the pill, so followed as visible). */
+  async list(workspaceIds: readonly string[]): Promise<WorkspaceLinks[]> {
     const refs = workspaceIds.map((workspaceId) => ({ workspaceId, refs: this.store.list(workspaceId) }));
-    const prs = await this.prs.get(dedupe(refs.flatMap((entry) => entry.refs)), force);
+    const { prs, stale } = await this.follows.prs(dedupe(refs.flatMap((entry) => entry.refs)), "visible");
     return refs.map(({ workspaceId, refs }) => ({
       workspaceId,
       prs: refs.map((ref) => prs.get(url(ref))).filter((pr): pr is Pr => Boolean(pr)),
-      ...(refs.some((ref) => this.prs.isStale(ref)) ? { stale: true } : {}),
+      ...(refs.some((ref) => stale.has(url(ref))) ? { stale: true } : {}),
     }));
   }
 
@@ -33,12 +36,13 @@ export class Links {
    */
   async link({ workspaceId, cwd }: WorkspaceRef, inputs: readonly string[]): Promise<LinkResult> {
     const { refs, errors } = await this.parse(cwd, inputs);
-    const found = await this.prs.get(refs, true);
+    // null: nothing could be read (paused or unreachable), so every PR is linked as given.
+    const found = refs.length ? await this.fetch(refs).catch(() => null) : new Map<string, Pr>();
     const valid: PrRef[] = [];
     for (const ref of refs) {
-      const pr = found.get(url(ref));
-      if (this.prs.isStale(ref)) valid.push(pr && pr.state !== "UNKNOWN" ? (canonical(pr) ?? ref) : ref);
-      else if (!pr || pr.state === "UNKNOWN") errors.push(`${ref.repo}#${ref.number}: not found on GitHub (or Paseo cannot read it)`);
+      const pr = found?.get(url(ref));
+      if (!found) valid.push(ref);
+      else if (!pr) errors.push(`${ref.repo}#${ref.number}: not found on GitHub (or Paseo cannot read it)`);
       else valid.push(canonical(pr) ?? ref);
     }
     this.store.link(workspaceId, valid);
