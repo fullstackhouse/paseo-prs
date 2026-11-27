@@ -331,6 +331,12 @@ describe("tool plumbing", () => {
     expect(isPrsPermission({ kind: "tool", name: "mcp__asks__ask_create" })).toBe(false);
   });
 
+  it("matches the host's provider-neutral tool on any provider", () => {
+    expect(isPrsPermission({ kind: "tool", name: "prs.prs_link" }, { server: "prs" })).toBe(true);
+    expect(isPrsPermission({ kind: "tool", name: "mcp__prs__prs_link" }, { server: "asks" })).toBe(false);
+    expect(isPrsPermission({ kind: "question", name: "prs.prs_link" }, { server: "prs" })).toBe(false);
+  });
+
   it("picks the Codex caller by working directory", () => {
     const agents = [
       { id: "a", cwd: "/w", status: "running" },
@@ -380,25 +386,21 @@ describe("withPrsTools", () => {
   const mcp = { type: "stdio" as const, command: "node", args: ["bridge.js"] };
   const base = { cwd: "/repo", mcpServers: { other: mcp } };
 
-  it("attaches the prs MCP server and preapproves its tools for providers that enforce exact grants", () => {
-    for (const provider of ["claude", "codex", "opencode", "claude/opus"]) {
-      const config = withPrsTools({ ...base, provider }, mcp);
-      expect(config.mcpServers).toMatchObject({ other: mcp, prs: mcp });
-      expect(config.toolPolicy?.preapproved.map((grant) => grant.server)).toContain("prs");
-    }
+  it("attaches the prs MCP server and preapproves its tools where the provider holds exact grants", () => {
+    const config = withPrsTools({ ...base, provider: "claude" }, mcp, true);
+    expect(config.mcpServers).toMatchObject({ other: mcp, prs: mcp });
+    expect(config.toolPolicy?.preapproved.map((grant) => grant.server)).toContain("prs");
   });
 
   it("keeps a preapproval another plugin already added", () => {
     const existing = { kind: "mcp" as const, server: "other", tool: "x" };
-    const config = withPrsTools({ ...base, provider: "claude", toolPolicy: { preapproved: [existing] } }, mcp);
+    const config = withPrsTools({ ...base, provider: "claude", toolPolicy: { preapproved: [existing] } }, mcp, true);
     expect(config.toolPolicy?.preapproved[0]).toEqual(existing);
   });
 
-  it("attaches the server but adds no tool policy for providers that can't preapprove, so creating the agent doesn't fail", () => {
-    for (const provider of ["copilot", "pi", "antigravity", "muse", "acp-gemini", "mock"]) {
-      const config = withPrsTools({ ...base, provider }, mcp);
-      expect(config.mcpServers).toMatchObject({ prs: mcp });
-      expect(config.toolPolicy).toBeUndefined();
-    }
+  it("attaches the server but adds no tool policy where the provider can't preapprove", () => {
+    const config = withPrsTools({ ...base, provider: "copilot" }, mcp, false);
+    expect(config.mcpServers).toMatchObject({ prs: mcp });
+    expect(config.toolPolicy).toBeUndefined();
   });
 });
