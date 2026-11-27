@@ -8,7 +8,7 @@ import { Links, type WorkspaceRef } from "./server/links";
 import { listen } from "./server/listener";
 import { Reports, ReportStore } from "./server/reports";
 import { dataDir, LinkStore } from "./server/store";
-import { callTool, INSTRUCTIONS, isPrsPermission, MCP_SERVER, pickCaller, PREAPPROVED, TOOLS } from "./server/tools";
+import { callTool, INSTRUCTIONS, isPrsPermission, pickCaller, TOOLS, withPrsTools } from "./server/tools";
 import { forkPr, linkPrs, listPrs, listReports, reportPr, unlinkPrs } from "./shared/prs";
 
 export default function contribute(server: PluginServerContext) {
@@ -45,9 +45,7 @@ export default function contribute(server: PluginServerContext) {
 
   server.before("agent.create", ({ request }, { paseo: api }) => {
     capture(api);
-    const { config } = request;
-    const preapproved = [...(config.toolPolicy?.preapproved ?? []), ...PREAPPROVED];
-    return { ...request, config: { ...config, mcpServers: { ...config.mcpServers, [MCP_SERVER]: mcp }, toolPolicy: { preapproved } } };
+    return { ...request, config: withPrsTools(request.config, mcp) };
   });
   // Plan mode and Codex prompt even for preapproved MCP tools. These only touch the PR list, so allow them here.
   server.on("agent.permission_requested", async ({ agent, request }, { paseo: api }) => {

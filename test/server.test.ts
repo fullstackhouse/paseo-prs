@@ -7,7 +7,7 @@ import type { HostChangeRequestRead } from "../server/host-sdk";
 import type { PaseoApi } from "@getpaseo/client";
 import { Links } from "../server/links";
 import { LinkStore } from "../server/store";
-import { callTool, isPrsPermission, pickCaller } from "../server/tools";
+import { callTool, isPrsPermission, pickCaller, withPrsTools } from "../server/tools";
 import { prUrl, type Pr, type PrRef } from "../shared/prs";
 
 const pr = (repo: string, number: number, overrides: Partial<Pr> = {}): Pr => ({
@@ -373,5 +373,32 @@ describe("coalescingFetcher", () => {
     const fetch = coalescingFetcher(async () => ((called = true), new Map()), 5);
     expect((await fetch([])).size).toBe(0);
     expect(called).toBe(false);
+  });
+});
+
+describe("withPrsTools", () => {
+  const mcp = { type: "stdio" as const, command: "node", args: ["bridge.js"] };
+  const base = { cwd: "/repo", mcpServers: { other: mcp } };
+
+  it("attaches the prs MCP server and preapproves its tools for providers that enforce exact grants", () => {
+    for (const provider of ["claude", "codex", "opencode", "claude/opus"]) {
+      const config = withPrsTools({ ...base, provider }, mcp);
+      expect(config.mcpServers).toMatchObject({ other: mcp, prs: mcp });
+      expect(config.toolPolicy?.preapproved.map((grant) => grant.server)).toContain("prs");
+    }
+  });
+
+  it("keeps a preapproval another plugin already added", () => {
+    const existing = { kind: "mcp" as const, server: "other", tool: "x" };
+    const config = withPrsTools({ ...base, provider: "claude", toolPolicy: { preapproved: [existing] } }, mcp);
+    expect(config.toolPolicy?.preapproved[0]).toEqual(existing);
+  });
+
+  it("attaches the server but adds no tool policy for providers that can't preapprove, so creating the agent doesn't fail", () => {
+    for (const provider of ["copilot", "pi", "antigravity", "muse", "acp-gemini", "mock"]) {
+      const config = withPrsTools({ ...base, provider }, mcp);
+      expect(config.mcpServers).toMatchObject({ prs: mcp });
+      expect(config.toolPolicy).toBeUndefined();
+    }
   });
 });
