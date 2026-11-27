@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { hostPrFetcher, PrCache, PrReadsPaused, PrReadsUnavailable, prOf, type PrFetcher } from "../server/github";
+import { coalescingFetcher, hostPrFetcher, PrCache, PrReadsPaused, PrReadsUnavailable, prOf, type PrFetcher } from "../server/github";
 import type { HostChangeRequestRead } from "../server/host-sdk";
 import type { PaseoApi } from "@getpaseo/client";
 import { Links } from "../server/links";
@@ -340,5 +340,38 @@ describe("tool plumbing", () => {
     expect(pickCaller(agents, "/w")).toBe("a");
     expect(pickCaller(agents, "/v/")).toBe("c");
     expect(pickCaller([...agents, { id: "d", cwd: "/w", status: "running" }], "/w")).toBeNull();
+  });
+});
+
+describe("coalescingFetcher", () => {
+  const pr = (repo: string, number: number) => ({ number, title: "t", url: `https://github.com/${repo}/pull/${number}`, state: "OPEN" as const, draft: false, checks: "none" as const, failing: 0, review: "none" as const });
+
+  it("sends reads asked for together to the host as one, each ref once", async () => {
+    const calls: string[][] = [];
+    const fetch = coalescingFetcher(async (refs) => {
+      calls.push(refs.map((ref) => `${ref.repo}#${ref.number}`));
+      return new Map(refs.map((ref) => [`https://github.com/${ref.repo}/pull/${ref.number}`, pr(ref.repo, ref.number)]));
+    }, 5);
+    const [a, b] = await Promise.all([fetch([{ repo: "o/r", number: 1 }]), fetch([{ repo: "o/r", number: 1 }, { repo: "o/s", number: 2 }])]);
+    expect(calls).toEqual([["o/r#1", "o/s#2"]]);
+    expect(a.get("https://github.com/o/r/pull/1")?.number).toBe(1);
+    expect(b.get("https://github.com/o/s/pull/2")?.number).toBe(2);
+    await fetch([{ repo: "o/r", number: 3 }]);
+    expect(calls).toHaveLength(2);
+  });
+
+  it("fails every read in the batch when the host read fails", async () => {
+    const fetch = coalescingFetcher(async () => {
+      throw new PrReadsPaused(5_000);
+    }, 5);
+    const reads = [fetch([{ repo: "o/r", number: 1 }]), fetch([{ repo: "o/r", number: 2 }])];
+    for (const read of reads) await expect(read).rejects.toThrow(PrReadsPaused);
+  });
+
+  it("answers an empty read without the host", async () => {
+    let called = false;
+    const fetch = coalescingFetcher(async () => ((called = true), new Map()), 5);
+    expect((await fetch([])).size).toBe(0);
+    expect(called).toBe(false);
   });
 });

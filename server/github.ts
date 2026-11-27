@@ -118,7 +118,7 @@ export async function readBranch(cwd: string, force: boolean, fetch: PrFetcher):
   // A new branch made from origin/main tracks it; that is not its PR head.
   const head = tracked && tracked !== base ? tracked : branch;
   const [prs, stack] = await Promise.all([
-    repo ? readBranchPrs(cwd, repo, head, fetch) : [],
+    repo ? readBranchPrs(cwd, repo, head, force, fetch) : [],
     repo ? readStack(repo, head, force, fetch) : [],
   ]);
   return { cwd, repo, branch, isDefault: false, ahead, prs, stack };
@@ -160,10 +160,48 @@ export class EdgeCache {
 
 const openEdges = new EdgeCache();
 
-/** The branch's PRs, newest first as gh lists them: gh finds them by head branch, the host reads their state. */
-async function readBranchPrs(cwd: string, repo: string, head: string, fetch: PrFetcher): Promise<Pr[]> {
+/**
+ * A branch's PR numbers, newest first. Open PRs come from the repo's open-PR edges, which every checkout of the repo
+ * shares and stacks read anyway, so a branch with an open PR costs no `gh` call of its own. Only a branch with none open
+ * asks `gh` for its merged or closed PRs, and that answer keeps for TERMINAL_TTL_MS unless forced: a PR opened on the
+ * branch later shows up in the edges first.
+ */
+export class BranchPrs {
+  private readonly settled = new Map<string, { at: number; value: Promise<number[]> }>();
+
+  constructor(
+    private readonly edges: (repo: string, force: boolean) => Promise<PrEdge[]> = (repo, force) => openEdges.get(repo, force),
+    private readonly list: (cwd: string, repo: string, head: string) => Promise<number[]> = listBranchPrs,
+    private readonly now: () => number = Date.now,
+  ) {}
+
+  async get(cwd: string, repo: string, head: string, force = false): Promise<number[]> {
+    const edges = await this.edges(repo, force).catch(() => null);
+    const open = (edges ?? []).filter((edge) => edge.head === head).map((edge) => edge.number);
+    if (open.length) return open.sort((a, b) => b - a);
+    const key = `${repo.toLowerCase()}\0${head}`;
+    const hit = this.settled.get(key);
+    if (hit && !force && this.now() - hit.at < TERMINAL_TTL_MS) return hit.value;
+    const entry = { at: this.now(), value: this.list(cwd, repo, head) };
+    // A failed lookup isn't kept: the next read asks again.
+    entry.value.catch(() => {
+      if (this.settled.get(key) === entry) this.settled.delete(key);
+    });
+    this.settled.set(key, entry);
+    return entry.value;
+  }
+}
+
+async function listBranchPrs(cwd: string, _repo: string, head: string): Promise<number[]> {
   const json = await gh.run(cwd, ["pr", "list", "--head", head, "--state", "all", "--limit", "20", "--json", "number"]);
-  const refs = BranchPrsSchema.parse(JSON.parse(json)).map(({ number }) => ({ repo, number }));
+  return BranchPrsSchema.parse(JSON.parse(json)).map(({ number }) => number);
+}
+
+const branchPrs = new BranchPrs();
+
+/** The branch's PRs, newest first; the host reads their state. */
+async function readBranchPrs(cwd: string, repo: string, head: string, force: boolean, fetch: PrFetcher): Promise<Pr[]> {
+  const refs = (await branchPrs.get(cwd, repo, head, force)).map((number) => ({ repo, number }));
   const fetched = await fetch(refs);
   return refs.map((ref) => fetched.get(prUrl(ref)) ?? unavailable(ref));
 }
@@ -313,6 +351,29 @@ export function hostPrFetcher(paseo: () => PaseoApi | null): PrFetcher {
       if (read?.ok) prs.set(prUrl(ref), prOf(read));
     });
     return prs;
+  };
+}
+
+/**
+ * Reads asked for within `windowMs` of each other go to `fetch` as one: a `listPrs` call refreshes every checkout at once,
+ * and each checkout's branch, stack and linked PRs would otherwise be a host read (a GraphQL query) each.
+ */
+export function coalescingFetcher(fetch: PrFetcher, windowMs = 10): PrFetcher {
+  let open: { refs: Map<string, PrRef>; result: Promise<Map<string, Pr>> } | null = null;
+  return (refs) => {
+    if (!refs.length) return Promise.resolve(new Map());
+    if (!open) {
+      const batch: { refs: Map<string, PrRef>; result: Promise<Map<string, Pr>> } = { refs: new Map(), result: Promise.resolve(new Map()) };
+      batch.result = new Promise((resolve, reject) => {
+        setTimeout(() => {
+          if (open === batch) open = null;
+          fetch([...batch.refs.values()]).then(resolve, reject);
+        }, windowMs);
+      });
+      open = batch;
+    }
+    for (const ref of refs) open.refs.set(prUrl(ref), ref);
+    return open.result;
   };
 }
 

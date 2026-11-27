@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { BranchCache, EdgeCache, Gh, isRateLimit, PrReadsPaused, RateLimited } from "../server/github";
+import { BranchCache, BranchPrs, EdgeCache, Gh, isRateLimit, PrReadsPaused, RateLimited } from "../server/github";
 import type { Branch, Pr, PrEdge } from "../shared/prs";
 
 const pr = (overrides: Partial<Pr> = {}): Pr => ({
@@ -208,5 +208,65 @@ describe("BranchCache", () => {
     paused = true;
     now = 120_000;
     expect(await cache.get("/w")).toMatchObject({ prs: [{ state: "OPEN" }], stale: true });
+  });
+});
+
+describe("BranchPrs", () => {
+  const edge = (number: number, head: string) => ({ number, head, base: "main" });
+
+  it("takes a branch's open PRs from the repo's open-PR edges without asking gh", async () => {
+    const listed: string[] = [];
+    const prs = new BranchPrs(
+      async () => [edge(7, "feat/x"), edge(9, "feat/x"), edge(8, "feat/y")],
+      async (_cwd, _repo, head) => (listed.push(head), []),
+    );
+    expect(await prs.get("/w", "o/r", "feat/x")).toEqual([9, 7]);
+    expect(listed).toEqual([]);
+  });
+
+  it("asks gh only for a branch with no open PR, and keeps that answer for an hour unless forced", async () => {
+    let now = 0;
+    const listed: string[] = [];
+    const prs = new BranchPrs(
+      async () => [],
+      async (_cwd, _repo, head) => (listed.push(head), [5]),
+      () => now,
+    );
+    expect(await prs.get("/w", "o/r", "feat/merged")).toEqual([5]);
+    now = 59 * 60_000;
+    expect(await prs.get("/w", "o/r", "feat/merged")).toEqual([5]);
+    expect(listed).toEqual(["feat/merged"]);
+    await prs.get("/w", "o/r", "feat/merged", true);
+    expect(listed).toEqual(["feat/merged", "feat/merged"]);
+    now = 2 * 60 * 60_000;
+    await prs.get("/w", "o/r", "feat/merged");
+    expect(listed).toHaveLength(3);
+  });
+
+  it("finds a PR opened on a branch from the edges, past the kept gh answer", async () => {
+    let open: ReturnType<typeof edge>[] = [];
+    const prs = new BranchPrs(
+      async () => open,
+      async () => [],
+    );
+    expect(await prs.get("/w", "o/r", "feat/new")).toEqual([]);
+    open = [edge(12, "feat/new")];
+    expect(await prs.get("/w", "o/r", "feat/new")).toEqual([12]);
+  });
+
+  it("falls back to gh when the edges can't be read, and doesn't keep a failed lookup", async () => {
+    let calls = 0;
+    const prs = new BranchPrs(
+      async () => {
+        throw new Error("gh failed");
+      },
+      async () => {
+        calls += 1;
+        if (calls === 1) throw new Error("gh failed");
+        return [3];
+      },
+    );
+    await expect(prs.get("/w", "o/r", "feat/x")).rejects.toThrow("gh failed");
+    expect(await prs.get("/w", "o/r", "feat/x")).toEqual([3]);
   });
 });
