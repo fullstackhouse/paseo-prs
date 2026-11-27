@@ -1,8 +1,9 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { linkedPrsQuery, parseLinkedPrs } from "./graphql";
+import type { PaseoApi } from "@getpaseo/client";
 import { z } from "zod";
-import { parsePrs, parseRemote, prUrl, stackOf, type Branch, type Pr, type PrEdge, type PrRef } from "../shared/prs";
+import { parseRemote, prUrl, stackOf, type Branch, type Pr, type PrEdge, type PrRef } from "../shared/prs";
+import type { HostChangeRequestRead } from "./host-sdk";
 
 const exec = promisify(execFile);
 
@@ -93,11 +94,17 @@ export async function readRepo(cwd: string): Promise<string | null> {
   return parseRemote(await git(cwd, "remote", "get-url", "origin").catch(() => ""));
 }
 
-const PR_FIELDS = "number,title,url,state,isDraft,reviewDecision,statusCheckRollup";
+const BranchPrsSchema = z.array(z.object({ number: z.number() }));
 
 const noBranch = (cwd: string, repo: string | null = null): Branch => ({ cwd, repo, branch: null, isDefault: false, ahead: 0, prs: [], stack: [] });
 
-export async function readBranch(cwd: string, force = false): Promise<Branch> {
+/** Reads a branch with PR state from `fetch`; `gh` only finds which PRs it has. */
+export const branchReader =
+  (fetch: PrFetcher) =>
+  (cwd: string, force = false): Promise<Branch> =>
+    readBranch(cwd, force, fetch);
+
+export async function readBranch(cwd: string, force: boolean, fetch: PrFetcher): Promise<Branch> {
   const repo = await readRepo(cwd);
   const none = noBranch(cwd, repo);
   const branch = await git(cwd, "symbolic-ref", "--quiet", "--short", "HEAD").catch(() => "");
@@ -111,8 +118,8 @@ export async function readBranch(cwd: string, force = false): Promise<Branch> {
   // A new branch made from origin/main tracks it; that is not its PR head.
   const head = tracked && tracked !== base ? tracked : branch;
   const [prs, stack] = await Promise.all([
-    gh.run(cwd, ["pr", "list", "--head", head, "--state", "all", "--limit", "20", "--json", PR_FIELDS]).then(parsePrs),
-    repo ? readStack(repo, head, force) : [],
+    repo ? readBranchPrs(cwd, repo, head, fetch) : [],
+    repo ? readStack(repo, head, force, fetch) : [],
   ]);
   return { cwd, repo, branch, isDefault: false, ahead, prs, stack };
 }
@@ -153,10 +160,18 @@ export class EdgeCache {
 
 const openEdges = new EdgeCache();
 
-/** The open PRs stacked with `head`: the repo's open-PR edges for the walk, one batch for their states. */
-async function readStack(repo: string, head: string, force: boolean): Promise<Pr[]> {
+/** The branch's PRs, newest first as gh lists them: gh finds them by head branch, the host reads their state. */
+async function readBranchPrs(cwd: string, repo: string, head: string, fetch: PrFetcher): Promise<Pr[]> {
+  const json = await gh.run(cwd, ["pr", "list", "--head", head, "--state", "all", "--limit", "20", "--json", "number"]);
+  const refs = BranchPrsSchema.parse(JSON.parse(json)).map(({ number }) => ({ repo, number }));
+  const fetched = await fetch(refs);
+  return refs.map((ref) => fetched.get(prUrl(ref)) ?? unavailable(ref));
+}
+
+/** The open PRs stacked with `head`: the repo's open-PR edges for the walk, one read for their states. */
+async function readStack(repo: string, head: string, force: boolean, fetch: PrFetcher): Promise<Pr[]> {
   const refs = stackOf(head, await openEdges.get(repo, force)).map((number) => ({ repo, number }));
-  const fetched = await ghPrFetcher(refs);
+  const fetched = await fetch(refs);
   return refs.flatMap((ref) => fetched.get(prUrl(ref)) ?? []);
 }
 
@@ -193,7 +208,7 @@ export class BranchCache {
   private readonly entries = new Map<string, { at: number; ttl: number; checkout: Promise<string>; value: Promise<Branch> }>();
 
   constructor(
-    private readonly read: (cwd: string, force: boolean) => Promise<Branch> = readBranch,
+    private readonly read: (cwd: string, force: boolean) => Promise<Branch>,
     private readonly now: () => number = Date.now,
     private readonly checkout: (cwd: string) => Promise<string> = readCheckout,
   ) {}
@@ -216,7 +231,7 @@ export class BranchCache {
         return branch;
       },
       (error) => {
-        if (!(error instanceof RateLimited)) console.error(`[prs] ${cwd}: ${message(error)}`);
+        if (!quiet(error)) console.error(`[prs] ${cwd}: ${message(error)}`);
         return (hit?.value ?? Promise.resolve(noBranch(cwd))).then((previous): Branch => ({ ...previous, stale: true }));
       },
     );
@@ -225,30 +240,89 @@ export class BranchCache {
   }
 }
 
-/** Fetches PRs by reference: one `gh api graphql` call for all of them, whatever their repos. */
+/** Reads PR state by reference, whatever their repos; a PR the host couldn't read is left out. */
 export type PrFetcher = (refs: readonly PrRef[]) => Promise<Map<string, Pr>>;
 
-export const ghPrFetcher: PrFetcher = async (refs) => {
-  if (!refs.length) return new Map();
-  const { query, aliases } = linkedPrsQuery(refs);
-  // gh exits non-zero when any alias fails (a deleted PR), but still prints the data it has.
-  const stdout = await gh.run(process.cwd(), ["api", "graphql", "-f", `query=${query}`]).catch((error: { stdout?: string }) => {
-    if (error.stdout) return error.stdout;
-    throw error;
-  });
-  return parseLinkedPrs(stdout, aliases);
+/** No PR state can be read: no daemon session yet, or a host older than `changeRequests.read`. */
+export class PrReadsUnavailable extends Error {}
+
+/**
+ * The host holds GitHub reads to stay under the rate limit until `retryAt`. The pause covers every PR on the host, so
+ * the caches keep what they have, marked stale, rather than showing PRs as unknown.
+ */
+export class PrReadsPaused extends Error {
+  constructor(readonly retryAt: number | undefined) {
+    super(`Paseo paused GitHub reads${retryAt ? ` until ${new Date(retryAt).toISOString()}` : ""}`);
+  }
+}
+
+/** Expected while GitHub or the host can't be read; the caches serve what they have without logging each read. */
+const quiet = (error: unknown) =>
+  error instanceof RateLimited || error instanceof PrReadsUnavailable || error instanceof PrReadsPaused;
+
+const REVIEWS: Record<string, Pr["review"]> = {
+  approved: "approved",
+  changes_requested: "changes_requested",
+  review_required: "review_required",
 };
 
-/** Linked PRs per GraphQL query. Each reads up to 100 check contexts, so a big query times out. */
-export const PR_BATCH_SIZE = 25;
+/** The host's read in the plugin's `Pr` shape. */
+export function prOf(read: Extract<HostChangeRequestRead, { ok: true }>): Pr {
+  return {
+    number: read.number,
+    title: read.title,
+    url: read.url,
+    state: read.state === "merged" ? "MERGED" : read.state === "closed" ? "CLOSED" : "OPEN",
+    draft: read.isDraft,
+    checks: read.checksState,
+    failing: read.checks.filter((check) => check.state === "failing").length,
+    review: REVIEWS[read.reviewDecision ?? ""] ?? "none",
+  };
+}
 
-/** Linked PR states by URL, at most once per TTL each (TERMINAL_TTL_MS once closed, never again once merged); a batch fetches only what is missing or stale. */
+/**
+ * PR state from the host (`paseo.changeRequests.read`), which reads every plugin's PRs through one batched reader with
+ * one rate-limit pause. Older hosts lack it: reads fail with `PrReadsUnavailable`, logged once. While the host is
+ * paused, reads fail with `PrReadsPaused`, logged once per pause, so the caches keep their last state marked stale.
+ */
+export function hostPrFetcher(paseo: () => PaseoApi | null): PrFetcher {
+  let warned = false;
+  // The pause last logged, so a pause is logged once however many reads hit it.
+  let loggedPause: number | undefined | null = null;
+  return async (refs) => {
+    if (!refs.length) return new Map();
+    const api = paseo();
+    if (!api) throw new PrReadsUnavailable("No daemon session yet");
+    if (!api.changeRequests) {
+      if (!warned) console.error("[prs] this Paseo can't read pull requests for plugins; update it to see PR state");
+      warned = true;
+      throw new PrReadsUnavailable("Host lacks changeRequests.read");
+    }
+    const results = await api.changeRequests.read(refs.map(prUrl));
+    const paused = results.find((read) => !read.ok && read.reason === "paused");
+    if (paused && !paused.ok) {
+      const error = new PrReadsPaused(paused.retryAt);
+      if (loggedPause !== paused.retryAt) console.error(`[prs] ${error.message}; showing the last known PR state`);
+      loggedPause = paused.retryAt;
+      throw error;
+    }
+    const prs = new Map<string, Pr>();
+    // One result per URL, in request order.
+    refs.forEach((ref, index) => {
+      const read = results[index];
+      if (read?.ok) prs.set(prUrl(ref), prOf(read));
+    });
+    return prs;
+  };
+}
+
+/** Linked PR states by URL, at most once per TTL each (TERMINAL_TTL_MS once closed, never again once merged); a read fetches only what is missing or stale. */
 export class PrCache {
   private readonly entries = new Map<string, { at: number; pr: Pr }>();
   /** URLs whose last fetch failed: what we serve for them is the last answer, or unavailable. */
   private readonly failed = new Set<string>();
 
-  constructor(private readonly fetch: PrFetcher = ghPrFetcher, private readonly now: () => number = Date.now) {}
+  constructor(private readonly fetch: PrFetcher, private readonly now: () => number = Date.now) {}
 
   /** True when GitHub couldn't be read for `ref` the last time it was due. */
   isStale(ref: PrRef): boolean {
@@ -263,26 +337,20 @@ export class PrCache {
       if (hit?.pr.state === "MERGED") return false;
       return force || !hit || this.now() - hit.at >= (terminal(hit.pr) ? TERMINAL_TTL_MS : TTL_MS);
     });
-    let rateLimited = false;
-    // One query for every linked PR across all workspaces times out on GitHub (HTTP 504) and failed
-    // them all; chunks run one after another, so a failing chunk only marks its own PRs stale.
-    for (let start = 0; start < stale.length; start += PR_BATCH_SIZE) {
-      const chunk = stale.slice(start, start + PR_BATCH_SIZE);
-      const fetched = rateLimited
-        ? null
-        : await this.fetch(chunk).catch((error) => {
-            if (error instanceof RateLimited) rateLimited = true;
-            else console.error(`[prs] linked PRs: ${message(error)}`);
-            return null;
-          });
-      // A failed call keeps what we had; a PR GitHub did not return shows as unavailable.
+    if (stale.length) {
+      // The host batches and rate-limits the read; a failed read keeps what we had.
+      const fetched = await this.fetch(stale).catch((error) => {
+        if (!quiet(error)) console.error(`[prs] linked PRs: ${message(error)}`);
+        return null;
+      });
+      // A PR the host did not return shows as unavailable.
       if (fetched) {
         const at = this.now();
-        for (const ref of chunk) {
+        for (const ref of stale) {
           this.entries.set(prUrl(ref), { at, pr: fetched.get(prUrl(ref)) ?? unavailable(ref) });
           this.failed.delete(prUrl(ref));
         }
-      } else for (const ref of chunk) this.failed.add(prUrl(ref));
+      } else for (const ref of stale) this.failed.add(prUrl(ref));
     }
     return new Map(refs.map((ref) => [prUrl(ref), this.entries.get(prUrl(ref))?.pr ?? unavailable(ref)]));
   }
