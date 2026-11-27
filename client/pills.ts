@@ -9,6 +9,7 @@ import {
   listReports,
   pillFor,
   PR_LABEL,
+  isActive,
   prAgentFor,
   relatedPrs,
   reportPillFor,
@@ -43,18 +44,30 @@ interface AgentInfo {
   workspaceId: string;
   cwd: string;
   running: boolean;
+  /** When the agent last did anything (epoch ms), or 0 when unknown. */
+  activeAt: number;
   labels: Readonly<Record<string, string>>;
 }
 
-type AgentPayload = { id: string; workspaceId?: string | null; cwd: string; status: string; archivedAt?: string | null; labels?: Record<string, string> };
+type AgentPayload = {
+  id: string;
+  workspaceId?: string | null;
+  cwd: string;
+  status: string;
+  archivedAt?: string | null;
+  lastActivityAt?: string | null;
+  labels?: Record<string, string>;
+};
 
 const infoOf = (agent: AgentPayload & { workspaceId: string }): AgentInfo => ({
   id: agent.id,
   workspaceId: agent.workspaceId,
   cwd: agent.cwd,
   running: agent.status === "running" || agent.status === "initializing",
+  activeAt: agent.lastActivityAt ? Date.parse(agent.lastActivityAt) || 0 : 0,
   labels: agent.labels ?? {},
 });
+
 
 // The new agent shows up in the agent list a moment after create returns; navigating before that finds nothing.
 const OPEN_WAIT_MS = 5_000;
@@ -81,7 +94,7 @@ export function contributePills(client: PluginClientContext, openAgent: (agentId
   const views = new Map<string, AgentPrs>();
   const listeners = new Set<() => void>();
 
-  const refresh = async (workspaces: { workspaceId: string; cwd: string }[], force = false) => {
+  const refresh = async (workspaces: { workspaceId: string; cwd: string; active: boolean }[], force = false) => {
     if (!workspaces.length || lifetime.signal.aborted) return;
     const forks = forkIds();
     const [result, states] = await Promise.all([
@@ -103,7 +116,7 @@ export function contributePills(client: PluginClientContext, openAgent: (agentId
     // Any agent's rows can change: they point at other workspaces that are on the same PRs.
     renderAll();
   };
-  const refreshQuietly = (workspaces: { workspaceId: string; cwd: string }[], force = false) =>
+  const refreshQuietly = (workspaces: { workspaceId: string; cwd: string; active: boolean }[], force = false) =>
     void refresh(workspaces, force).catch((error) => console.error("[prs] refresh failed", error));
   const forkIds = () => [...agents.values()].filter((agent) => agent.labels[FORKED_FROM_LABEL]).map((agent) => agent.id);
   const applyReports = (states: Record<string, ReportState>) => {
@@ -116,7 +129,20 @@ export function contributePills(client: PluginClientContext, openAgent: (agentId
     applyReports((await client.rpc(listReports, { agentIds: forks })).reports);
     renderAll();
   };
-  const all = () => [...new Map([...agents.values()].map((agent) => [`${agent.workspaceId}\0${agent.cwd}`, agent])).values()];
+  /** Every workspace checkout with a live agent, active when any of its agents is. */
+  const all = () => {
+    const now = Date.now();
+    const byCheckout = new Map<string, { workspaceId: string; cwd: string; active: boolean }>();
+    for (const agent of agents.values()) {
+      const key = `${agent.workspaceId}\0${agent.cwd}`;
+      const active = isActive(agent, now);
+      const known = byCheckout.get(key);
+      if (known) known.active ||= active;
+      else byCheckout.set(key, { workspaceId: agent.workspaceId, cwd: agent.cwd, active });
+    }
+    return [...byCheckout.values()];
+  };
+  const one = (agent: AgentInfo) => ({ workspaceId: agent.workspaceId, cwd: agent.cwd, active: isActive(agent, Date.now()) });
 
   const store: PrsStore = {
     get: (agentId) => views.get(agentId),
@@ -135,14 +161,14 @@ export function contributePills(client: PluginClientContext, openAgent: (agentId
       const agent = agents.get(agentId);
       if (!agent) throw new Error("This agent is gone");
       const result = await client.rpc(linkPrs, { workspaceId: agent.workspaceId, cwd: agent.cwd, refs });
-      await refresh([agent]);
+      await refresh([{ ...one(agent), active: true }]); // the user is in its popover
       return result;
     },
     async unlink(agentId, url) {
       const agent = agents.get(agentId);
       if (!agent) throw new Error("This agent is gone");
       await client.rpc(unlinkPrs, { workspaceId: agent.workspaceId, cwd: agent.cwd, refs: [url] });
-      await refresh([agent]);
+      await refresh([{ ...one(agent), active: true }]); // the user is in its popover
     },
     async fork(agentId, prUrl) {
       const { agentId: forked } = await client.rpc(forkPr, { agentId, prUrl });
@@ -250,8 +276,10 @@ export function contributePills(client: PluginClientContext, openAgent: (agentId
     const running = next.running;
     agents.set(agent.id, next);
     // A turn that just ended may have pushed, opened, merged or linked a PR: read again past the cache.
-    if (!previous || previous.cwd !== agent.cwd || previous.workspaceId !== next.workspaceId) refreshQuietly([next]);
-    else if (previous.running && !running) refreshQuietly([next], true);
+    if (!previous || previous.cwd !== agent.cwd || previous.workspaceId !== next.workspaceId) refreshQuietly([one(next)]);
+    else if (previous.running && !running) refreshQuietly([one(next)], true);
+    // Started running: its workspace is looked at now, so follow its PRs as visible and read its stack.
+    else if (!previous.running && running) refreshQuietly([one(next)]);
     else if (previous.running !== running) render(agent.id);
   };
   const drop = (agentId: string) => {

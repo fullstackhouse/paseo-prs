@@ -28,6 +28,18 @@ describe("PrFollows", () => {
     expect(host.readCalls).toEqual([]);
   });
 
+  it("swaps a branch's visible follow for a background one when its workspace goes idle, keeping the state", async () => {
+    const host = fakeHost({ reads: [read(A)], branches: [{ repo: "o/r", headRef: "feat/x", ok: true, urls: [A] }] });
+    const follows = new PrFollows(() => host.api);
+    expect((await follows.branch("o/r", "feat/x", "visible")).prs.map((pr) => pr.number)).toEqual([1]);
+    const idle = await follows.branch("o/r", "feat/x", "background");
+    expect(idle.prs.map((pr) => [pr.number, pr.state])).toEqual([[1, "OPEN"]]);
+    expect(host.live().map((subscription) => subscription.target.priority)).toEqual(["background"]);
+    // Asked again at the same priority: no new subscription.
+    await follows.branch("o/r", "feat/x", "background");
+    expect(host.subscriptions).toHaveLength(2);
+  });
+
   it("takes pushed changes and tells its clients", async () => {
     const host = fakeHost({ reads: [read(A)] });
     const onChange = vi.fn();

@@ -40,9 +40,16 @@ export type WorkspaceLinks = z.infer<typeof WorkspaceLinksSchema>;
 
 const WorkspaceRefSchema = z.object({ workspaceId: z.string(), cwd: z.string() });
 
+/**
+ * `active`: someone is likely looking at the workspace (an agent there runs or ran lately). Only active workspaces have
+ * their PRs followed as `visible` and their stacks read; the rest are followed in the background, which the host reads
+ * every 10 minutes instead of every 2. Older clients omit it, and their workspaces count as active.
+ */
+const ListWorkspaceSchema = WorkspaceRefSchema.extend({ active: z.boolean().optional() });
+
 export const listPrs = defineRpc({
   name: "prs.list",
-  input: z.object({ workspaces: z.array(WorkspaceRefSchema), force: z.boolean().optional() }),
+  input: z.object({ workspaces: z.array(ListWorkspaceSchema), force: z.boolean().optional() }),
   output: z.object({ branches: z.array(BranchSchema), links: z.array(WorkspaceLinksSchema) }),
 });
 
@@ -325,3 +332,14 @@ export async function createPrPrompt(workspace: Partial<PullRequestPromptSource>
   if (typeof workspace.pullRequestPrompt !== "function") throw new Error("Update Paseo to create PRs through an agent");
   return workspace.pullRequestPrompt();
 }
+
+/**
+ * A workspace whose agent runs or ran this recently counts as looked at: its PRs are followed as visible and its stack
+ * is read. Plugins can't see which workspace is on screen, and every workspace's pill exists whether or not anyone
+ * opens it, so recent activity is the best signal there is.
+ */
+export const ACTIVE_WINDOW_MS = 30 * 60_000;
+
+/** Whether an agent's workspace counts as active at `now`; `activeAt` is its last activity in epoch ms, or 0. */
+export const isActive = (agent: { running: boolean; activeAt: number }, now: number) =>
+  agent.running || now - agent.activeAt < ACTIVE_WINDOW_MS;

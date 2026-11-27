@@ -88,9 +88,17 @@ export default function contribute(server: PluginServerContext) {
 
   server.handle(listPrs, async ({ workspaces, force }, { paseo: api }) => {
     capture(api);
-    const cwds = [...new Set(workspaces.map((workspace) => workspace.cwd))];
-    const workspaceIds = [...new Set(workspaces.map((workspace) => workspace.workspaceId))];
-    const [read, linked] = await Promise.all([Promise.all(cwds.map((cwd) => readBranch(cwd, force === true, follows))), links.list(workspaceIds)]);
+    // Older clients send no `active`: treat their workspaces as looked at, as before.
+    const activeCwds = new Map<string, boolean>();
+    const activeIds = new Map<string, boolean>();
+    for (const { workspaceId, cwd, active = true } of workspaces) {
+      activeCwds.set(cwd, (activeCwds.get(cwd) ?? false) || active);
+      activeIds.set(workspaceId, (activeIds.get(workspaceId) ?? false) || active);
+    }
+    const [read, linked] = await Promise.all([
+      Promise.all([...activeCwds].map(([cwd, active]) => readBranch(cwd, force === true, follows, active))),
+      links.list([...activeIds].map(([workspaceId, active]) => ({ workspaceId, active }))),
+    ]);
     return { branches: read, links: linked };
   });
   // COMPAT(pluginSubscriptions): hosts from Paseo 0.15 serve this contract (it has `event`) as a subscription.
