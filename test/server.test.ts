@@ -272,7 +272,36 @@ describe("Links", () => {
     expect((await links.list(["w"], true))[0]).not.toHaveProperty("stale");
   });
 
-    it("unlinks and says what was not linked", async () => {
+  it("links a PR it can't read while reads are paused, marked stale, and reads it once they resume", async () => {
+    const github = fakeGitHub([pr("Org/Repo", 7)]);
+    let paused = true;
+    const store = new LinkStore(mkdtempSync(join(tmpdir(), "prs-")));
+    const cache = new PrCache(async (refs) => {
+      if (paused) throw new PrReadsPaused(10_000);
+      return github.fetch(refs);
+    });
+    const links = new Links(store, cache, async () => "org/repo");
+
+    const result = await links.link(workspace, ["https://github.com/Org/Repo/pull/7", "#404"]);
+    expect(result).toEqual({ linked: ["https://github.com/Org/Repo/pull/7", "https://github.com/org/repo/pull/404"], errors: [] });
+    expect(store.list("w")).toEqual([
+      { repo: "Org/Repo", number: 7 },
+      { repo: "org/repo", number: 404 },
+    ]);
+    expect((await links.list(["w"]))[0]).toMatchObject({ stale: true });
+
+    paused = false;
+    const [after] = await links.list(["w"], true);
+    expect(after).not.toHaveProperty("stale");
+    expect(after?.prs.map((entry) => [entry.number, entry.state])).toEqual([
+      [7, "OPEN"],
+      [404, "UNKNOWN"],
+    ]);
+    // Once reads work again, a PR GitHub doesn't have is rejected as before.
+    expect((await links.link(workspace, ["#405"])).errors).toEqual(["org/repo#405: not found on GitHub (or Paseo cannot read it)"]);
+  });
+
+  it("unlinks and says what was not linked", async () => {
     const { links, store } = setup();
     await links.link(workspace, ["#5"]);
     expect(await links.unlink(workspace, ["https://github.com/org/repo/pull/5", "#6"])).toEqual({
