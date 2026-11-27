@@ -26,14 +26,19 @@ export class Links {
     }));
   }
 
-  /** Links PRs that exist on GitHub, stored under GitHub's spelling of the repo. */
+  /**
+   * Links PRs that exist on GitHub, stored under GitHub's spelling of the repo. A PR that can't be read right now
+   * (Paseo paused GitHub reads, or the host is unreachable) is linked as given and shows stale until the next read:
+   * agents link PRs they just opened, and auto-link has no second chance, so rejecting it would lose the link.
+   */
   async link({ workspaceId, cwd }: WorkspaceRef, inputs: readonly string[]): Promise<LinkResult> {
     const { refs, errors } = await this.parse(cwd, inputs);
     const found = await this.prs.get(refs, true);
     const valid: PrRef[] = [];
     for (const ref of refs) {
       const pr = found.get(url(ref));
-      if (!pr || pr.state === "UNKNOWN") errors.push(`${ref.repo}#${ref.number}: not found on GitHub (or Paseo cannot read it)`);
+      if (this.prs.isStale(ref)) valid.push(pr && pr.state !== "UNKNOWN" ? (canonical(pr) ?? ref) : ref);
+      else if (!pr || pr.state === "UNKNOWN") errors.push(`${ref.repo}#${ref.number}: not found on GitHub (or Paseo cannot read it)`);
       else valid.push(canonical(pr) ?? ref);
     }
     this.store.link(workspaceId, valid);
