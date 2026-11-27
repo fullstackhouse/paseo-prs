@@ -96,7 +96,7 @@ const noBranch = (cwd: string, repo: string | null = null): Branch => ({ cwd, re
  * Reads a checkout's branch from git, its PRs from the host's PR service (`follows`), and its stack from the repo's
  * open-PR list. No call here reads PR state from GitHub itself.
  */
-export async function readBranch(cwd: string, force: boolean, follows: PrFollows): Promise<Branch> {
+export async function readBranch(cwd: string, force: boolean, follows: PrFollows, active = true): Promise<Branch> {
   const repo = await readRepo(cwd);
   const none = noBranch(cwd, repo);
   const branch = await git(cwd, "symbolic-ref", "--quiet", "--short", "HEAD").catch(() => "");
@@ -110,7 +110,11 @@ export async function readBranch(cwd: string, force: boolean, follows: PrFollows
   // A new branch made from origin/main tracks it; that is not its PR head.
   const head = tracked && tracked !== base ? tracked : branch;
   if (!repo) return { cwd, repo, branch, isDefault: false, ahead, prs: [], stack: [] };
-  const [own, stack] = await Promise.all([follows.branch(repo, head), readStack(repo, head, force, follows)]);
+  // An inactive workspace's pill isn't looked at: follow its branch in the background and leave its stack unread.
+  const [own, stack] = await Promise.all([
+    follows.branch(repo, head, active ? "visible" : "background"),
+    active ? readStack(repo, head, force, follows) : Promise.resolve({ prs: [], stale: false }),
+  ]);
   return { cwd, repo, branch, isDefault: false, ahead, prs: own.prs, stack: stack.prs, ...(own.stale || stack.stale ? { stale: true } : {}) };
 }
 

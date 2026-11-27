@@ -18,10 +18,22 @@ export class Links {
     private readonly repoOf: (cwd: string) => Promise<string | null> = readRepo,
   ) {}
 
-  /** Each workspace's linked PRs, as the host's PR service last pushed them (shown on the pill, so followed as visible). */
-  async list(workspaceIds: readonly string[]): Promise<WorkspaceLinks[]> {
-    const refs = workspaceIds.map((workspaceId) => ({ workspaceId, refs: this.store.list(workspaceId) }));
-    const { prs, stale } = await this.follows.prs(dedupe(refs.flatMap((entry) => entry.refs)), "visible");
+  /**
+   * Each workspace's linked PRs, as the host's PR service last pushed them. An active workspace's are followed as visible,
+   * the rest in the background; a PR linked to both is visible.
+   */
+  async list(workspaces: readonly (string | { workspaceId: string; active: boolean })[]): Promise<WorkspaceLinks[]> {
+    // A bare id (an agent's MCP tool, older callers) counts as active.
+    const refs = workspaces.map((workspace) => {
+      const { workspaceId, active } = typeof workspace === "string" ? { workspaceId: workspace, active: true } : workspace;
+      return { workspaceId, active, refs: this.store.list(workspaceId) };
+    });
+    const visible = dedupe(refs.filter((entry) => entry.active).flatMap((entry) => entry.refs));
+    const shown = new Set(visible.map(url));
+    const background = dedupe(refs.flatMap((entry) => entry.refs)).filter((ref) => !shown.has(url(ref)));
+    const [front, back] = await Promise.all([this.follows.prs(visible, "visible"), this.follows.prs(background, "background")]);
+    const prs = new Map([...back.prs, ...front.prs]);
+    const stale = new Set([...back.stale, ...front.stale]);
     return refs.map(({ workspaceId, refs }) => ({
       workspaceId,
       prs: refs.map((ref) => prs.get(url(ref))).filter((pr): pr is Pr => Boolean(pr)),

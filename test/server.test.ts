@@ -171,6 +171,20 @@ describe("Links", () => {
     expect(host.subscriptions.every((subscription) => subscription.target.priority === "visible")).toBe(true);
   });
 
+  it("follows an active workspace's links as visible and an idle one's in the background", async () => {
+    const { links, host } = setup();
+    await links.link(workspace, [URLS[0]!]);
+    await links.link({ workspaceId: "v", cwd: "/v" }, [URLS[0]!, URLS[2]!]);
+    await links.list([
+      { workspaceId: "w", active: true },
+      { workspaceId: "v", active: false },
+    ]);
+    const priorities = new Map(host.live().map((subscription) => [subscription.target.urls?.[0], subscription.target.priority]));
+    // Linked to both: shown on the active workspace's pill, so visible.
+    expect(priorities.get(URLS[0]!)).toBe("visible");
+    expect(priorities.get(URLS[2]!)).toBe("background");
+  });
+
   it("marks a workspace's links stale while the host pauses reads, keeping the last state", async () => {
     const { links, host } = setup();
     await links.link(workspace, ["#5"]);

@@ -69,13 +69,15 @@ export class PrFollows {
     private readonly now: () => number = Date.now,
   ) {}
 
-  /** The PRs whose head is `headRef` in `repo` (`owner/name`), newest first. */
-  async branch(repo: string, headRef: string): Promise<{ prs: Pr[]; stale: boolean }> {
+  /**
+   * The PRs whose head is `headRef` in `repo` (`owner/name`), newest first. `visible` while someone is likely looking at
+   * the workspace; `background` lets the host read it every 10 minutes instead of every 2.
+   */
+  async branch(repo: string, headRef: string, priority: "visible" | "background" = "visible"): Promise<{ prs: Pr[]; stale: boolean }> {
     const entry = await this.follow(`branch:${repo.toLowerCase()}\0${headRef}`, {
       // Closed too: with no open PR the pill shows the branch's latest merged or closed one (`visiblePrs`).
       branches: [{ repo: `https://github.com/${repo}`, headRef, includeClosed: true }],
-      // The workspace's own PRs: shown on its pill whenever the agent is.
-      priority: "visible",
+      priority,
     });
     const branch = entry?.branch;
     if (!entry || !branch) return { prs: [], stale: true };
@@ -130,7 +132,19 @@ export class PrFollows {
   /** The newest successful read of each PR across every entry, kept through failures and pauses. */
   private readonly lastGood = new Map<string, Pr>();
 
-  private async follow(id: string, target: HostSubscriptionTarget): Promise<Entry | null> {
+  /**
+   * One subscription per target and priority. Following a target at the other priority drops that subscription, so a
+   * workspace going idle stops its visible follow instead of keeping both until `prune`.
+   */
+  private async follow(target: string, subscribeTo: HostSubscriptionTarget): Promise<Entry | null> {
+    const priority = subscribeTo.priority ?? "background";
+    const id = `${target}\0${priority}`;
+    const other = `${target}\0${priority === "visible" ? "background" : "visible"}`;
+    const sibling = this.entries.get(other);
+    if (sibling) {
+      this.entries.delete(other);
+      void sibling.subscription.then((subscription) => subscription?.unsubscribe()).catch(() => undefined);
+    }
     const existing = this.entries.get(id);
     if (existing) {
       existing.usedAt = this.now();
@@ -140,7 +154,7 @@ export class PrFollows {
     const subscribe = this.subscriber();
     if (!subscribe) return null;
     const entry: Entry = { subscription: Promise.resolve(null), results: new Map(), branch: null, usedAt: this.now() };
-    entry.subscription = subscribe(target, (update) => {
+    entry.subscription = subscribe(subscribeTo, (update) => {
       this.apply(entry, update);
       this.onChange();
     }).then(
