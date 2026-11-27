@@ -23,9 +23,16 @@ import {
 import { makePopover, type AgentPrs, type PrsStore } from "./PrsPopover";
 import { makeReportPopover, type ForkReport, type ReportStore } from "./ReportPopover";
 import { createWorkspaceSummaries, summaryState } from "./summary";
+import { prChanges, type PrChangesEvent } from "../shared/changes";
 
-// Server reads are cached for 2 min (an hour for merged/closed PRs); this only bounds how stale a pill gets while nothing happens.
-const POLL_MS = 60_000;
+/** COMPAT(pluginSubscriptions): the npm SDK pin doesn't type `subscribe` on the plugin client. */
+interface SubscribingClient {
+  subscribe?: (contract: typeof prChanges, input: Record<string, never>, onEvent: (event: PrChangesEvent) => void) => () => void;
+}
+
+// PR changes are pushed (`prChanges`); this backstop catches what no push reports: a checkout switching branches outside a
+// turn, a host without plugin subscriptions. It reads git and the server's pushed state, never GitHub's PR state.
+const POLL_MS = 5 * 60_000;
 // While a fork writes its report, how often to look for the outcome.
 const REPORT_POLL_MS = 2_000;
 
@@ -255,6 +262,9 @@ export function contributePills(client: PluginClientContext, openAgent: (agentId
   };
 
   const timer = setInterval(() => refreshQuietly(all()), POLL_MS);
+  // The host pushed a change to a PR some pill shows: re-read now. Hosts without subscriptions rely on the poll.
+  const subscribing = client as PluginClientContext & SubscribingClient;
+  const stopChanges = typeof subscribing.subscribe === "function" ? subscribing.subscribe(prChanges, {}, () => refreshQuietly(all())) : () => undefined;
   // The server forwards a report as the fork's turn ends, a moment after the agent goes idle here.
   const reportTimer = setInterval(() => {
     if ([...reports.values()].some((report) => report.state === "writing")) {
@@ -290,6 +300,7 @@ export function contributePills(client: PluginClientContext, openAgent: (agentId
   return () => {
     lifetime.abort();
     clearInterval(timer);
+    stopChanges();
     clearInterval(reportTimer);
     clear();
     // Kept across a new agent snapshot, which prunes them on the next render; gone only with the plugin.

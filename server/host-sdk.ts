@@ -1,4 +1,4 @@
-/** One pull request as the host reads it. Mirrors `ChangeRequestRead` in fullstackhouse/paseo#270's protocol. */
+/** One pull request as the host reads it. Mirrors `ChangeRequestRead` in fullstackhouse/paseo's protocol. */
 export type HostChangeRequestRead =
   | {
       url: string;
@@ -12,6 +12,9 @@ export type HostChangeRequestRead =
       checksState: "passing" | "failing" | "pending" | "none";
       checks: { name: string; state: "passing" | "failing" | "pending" | "skipped"; url?: string }[];
       headSha: string;
+      author?: string | null;
+      reviewRequestCount?: number;
+      viewerCanMergeAsAdmin?: boolean;
     }
   | {
       url: string;
@@ -23,10 +26,47 @@ export type HostChangeRequestRead =
       retryAt?: number;
     };
 
-// COMPAT(changeRequestsRead): FSH hosts from fullstackhouse/paseo#270 read PR state for plugins (one batched,
-// rate-limited, cached reader for every plugin and the daemon). Older hosts lack it; the npm client has no type for it.
+/** The PRs whose head is a branch, newest first. Mirrors `ChangeRequestBranchRead` (fullstackhouse/paseo#285). */
+export interface HostBranchRead {
+  repo: string;
+  headRef: string;
+  ok: boolean;
+  urls: string[];
+  error?: string;
+  reason?: "paused" | "not_found" | "unsupported" | "error";
+  retryAt?: number;
+}
+
+/** What a subscription follows. Mirrors `ChangeRequestSubscriptionTarget` (fullstackhouse/paseo#285). */
+export interface HostSubscriptionTarget {
+  urls?: string[];
+  branches?: { repo: string; headRef: string; includeClosed?: boolean }[];
+  priority?: "visible" | "background";
+  include?: "deployments"[];
+}
+
+/** Every result and branch at subscribe time, then only what changed. */
+export interface HostSubscriptionUpdate {
+  results: HostChangeRequestRead[];
+  branches: HostBranchRead[];
+}
+
+export interface HostSubscription {
+  initial: HostSubscriptionUpdate;
+  unsubscribe(): Promise<void>;
+}
+
+export interface HostChangeRequests {
+  read(urls: string[]): Promise<HostChangeRequestRead[]>;
+  /** FSH hosts from fullstackhouse/paseo#285; absent before. */
+  subscribe?(target: HostSubscriptionTarget, onUpdate: (update: HostSubscriptionUpdate) => void): Promise<HostSubscription>;
+}
+
+// COMPAT(changeRequestsRead): FSH hosts from fullstackhouse/paseo#270 read PR state for plugins, and from #285
+// (COMPAT(changeRequestSubscriptions)) follow PRs and branches with pushed updates. The npm client has no type for
+// either; the plugin runs on the host's SDK, so a method is there exactly when the daemon serves it.
 declare module "@getpaseo/client" {
   interface PaseoApi {
-    readonly changeRequests?: { read(urls: string[]): Promise<HostChangeRequestRead[]> };
+    readonly changeRequests?: HostChangeRequests;
   }
 }

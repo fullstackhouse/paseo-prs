@@ -32,10 +32,10 @@ Reports go out only when you press the button. The fork agent has no tool to rep
 
 ## Setup
 
-Needs `git` and the GitHub CLI (`gh`), signed in, on the daemon machine. Only GitHub is supported.
+Needs `git` and the GitHub CLI (`gh`), signed in, on the daemon machine, and a Paseo build that follows pull requests for plugins (the FSH build with fullstackhouse/paseo#285); on older builds the pill can't show PR state and the log says to update Paseo. Only GitHub is supported.
 
 ## Limits
 
-- Status refreshes when an agent finishes a turn and otherwise about once a minute. Linked PRs are read in one GitHub GraphQL call per refresh, however many there are.
+- Paseo reads each PR once for every plugin that shows it, every 20 seconds while its checks run and you can see it, every 2 minutes otherwise, and pushes changes to the pill as they happen. A merged or closed PR isn't read again.
 - A branch is matched by name, so a PR from a fork with the same branch name also shows up.
 - Links are stored per workspace in `~/.paseo/plugin-data/prs/links.json` on the daemon machine. Agents created before the plugin was installed do not have the tools; use the popover or `/link-pr`.

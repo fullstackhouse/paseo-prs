@@ -3,7 +3,7 @@ import { promisify } from "node:util";
 import type { PaseoApi } from "@getpaseo/client";
 import { z } from "zod";
 import { parseRemote, prUrl, stackOf, type Branch, type Pr, type PrEdge, type PrRef } from "../shared/prs";
-import type { HostChangeRequestRead } from "./host-sdk";
+import { prOf, type PrFollows } from "./follows";
 
 const exec = promisify(execFile);
 
@@ -76,12 +76,8 @@ export class Gh {
 
 const gh = new Gh();
 
-// Clients poll every 60 s; a read they did not force is served from cache for two polls.
+// The repo's open-PR list for stacks is shared by every checkout of the repo for this long, unless forced.
 const TTL_MS = 120_000;
-// A merged or closed PR changes only when someone reopens it, which a forced read picks up sooner.
-const TERMINAL_TTL_MS = 60 * 60_000;
-
-const terminal = (pr: Pr) => pr.state === "MERGED" || pr.state === "CLOSED";
 
 /** origin's default branch, from the remote HEAD git recorded at clone time; "main" when it never did. */
 async function defaultBranch(cwd: string): Promise<string> {
@@ -94,17 +90,13 @@ export async function readRepo(cwd: string): Promise<string | null> {
   return parseRemote(await git(cwd, "remote", "get-url", "origin").catch(() => ""));
 }
 
-const BranchPrsSchema = z.array(z.object({ number: z.number() }));
-
 const noBranch = (cwd: string, repo: string | null = null): Branch => ({ cwd, repo, branch: null, isDefault: false, ahead: 0, prs: [], stack: [] });
 
-/** Reads a branch with PR state from `fetch`; `gh` only finds which PRs it has. */
-export const branchReader =
-  (fetch: PrFetcher) =>
-  (cwd: string, force = false): Promise<Branch> =>
-    readBranch(cwd, force, fetch);
-
-export async function readBranch(cwd: string, force: boolean, fetch: PrFetcher): Promise<Branch> {
+/**
+ * Reads a checkout's branch from git, its PRs from the host's PR service (`follows`), and its stack from the repo's
+ * open-PR list. No call here reads PR state from GitHub itself.
+ */
+export async function readBranch(cwd: string, force: boolean, follows: PrFollows): Promise<Branch> {
   const repo = await readRepo(cwd);
   const none = noBranch(cwd, repo);
   const branch = await git(cwd, "symbolic-ref", "--quiet", "--short", "HEAD").catch(() => "");
@@ -117,11 +109,9 @@ export async function readBranch(cwd: string, force: boolean, fetch: PrFetcher):
   const tracked = upstream.startsWith("origin/") ? upstream.slice("origin/".length) : "";
   // A new branch made from origin/main tracks it; that is not its PR head.
   const head = tracked && tracked !== base ? tracked : branch;
-  const [prs, stack] = await Promise.all([
-    repo ? readBranchPrs(cwd, repo, head, force, fetch) : [],
-    repo ? readStack(repo, head, force, fetch) : [],
-  ]);
-  return { cwd, repo, branch, isDefault: false, ahead, prs, stack };
+  if (!repo) return { cwd, repo, branch, isDefault: false, ahead, prs: [], stack: [] };
+  const [own, stack] = await Promise.all([follows.branch(repo, head), readStack(repo, head, force, follows)]);
+  return { cwd, repo, branch, isDefault: false, ahead, prs: own.prs, stack: stack.prs, ...(own.stale || stack.stale ? { stale: true } : {}) };
 }
 
 const EdgesSchema = z.array(z.object({ number: z.number(), headRefName: z.string(), baseRefName: z.string(), isCrossRepository: z.boolean() }));
@@ -160,57 +150,17 @@ export class EdgeCache {
 
 const openEdges = new EdgeCache();
 
-/**
- * A branch's PR numbers, newest first. Open PRs come from the repo's open-PR edges, which every checkout of the repo
- * shares and stacks read anyway, so a branch with an open PR costs no `gh` call of its own. Only a branch with none open
- * asks `gh` for its merged or closed PRs, and that answer keeps for TERMINAL_TTL_MS unless forced: a PR opened on the
- * branch later shows up in the edges first.
- */
-export class BranchPrs {
-  private readonly settled = new Map<string, { at: number; value: Promise<number[]> }>();
-
-  constructor(
-    private readonly edges: (repo: string, force: boolean) => Promise<PrEdge[]> = (repo, force) => openEdges.get(repo, force),
-    private readonly list: (cwd: string, repo: string, head: string) => Promise<number[]> = listBranchPrs,
-    private readonly now: () => number = Date.now,
-  ) {}
-
-  async get(cwd: string, repo: string, head: string, force = false): Promise<number[]> {
-    const edges = await this.edges(repo, force).catch(() => null);
-    const open = (edges ?? []).filter((edge) => edge.head === head).map((edge) => edge.number);
-    if (open.length) return open.sort((a, b) => b - a);
-    const key = `${repo.toLowerCase()}\0${head}`;
-    const hit = this.settled.get(key);
-    if (hit && !force && this.now() - hit.at < TERMINAL_TTL_MS) return hit.value;
-    const entry = { at: this.now(), value: this.list(cwd, repo, head) };
-    // A failed lookup isn't kept: the next read asks again.
-    entry.value.catch(() => {
-      if (this.settled.get(key) === entry) this.settled.delete(key);
-    });
-    this.settled.set(key, entry);
-    return entry.value;
-  }
-}
-
-async function listBranchPrs(cwd: string, _repo: string, head: string): Promise<number[]> {
-  const json = await gh.run(cwd, ["pr", "list", "--head", head, "--state", "all", "--limit", "20", "--json", "number"]);
-  return BranchPrsSchema.parse(JSON.parse(json)).map(({ number }) => number);
-}
-
-const branchPrs = new BranchPrs();
-
-/** The branch's PRs, newest first; the host reads their state. */
-async function readBranchPrs(cwd: string, repo: string, head: string, force: boolean, fetch: PrFetcher): Promise<Pr[]> {
-  const refs = (await branchPrs.get(cwd, repo, head, force)).map((number) => ({ repo, number }));
-  const fetched = await fetch(refs);
-  return refs.map((ref) => fetched.get(prUrl(ref)) ?? unavailable(ref));
-}
-
-/** The open PRs stacked with `head`: the repo's open-PR edges for the walk, one read for their states. */
-async function readStack(repo: string, head: string, force: boolean, fetch: PrFetcher): Promise<Pr[]> {
-  const refs = stackOf(head, await openEdges.get(repo, force)).map((number) => ({ repo, number }));
-  const fetched = await fetch(refs);
-  return refs.flatMap((ref) => fetched.get(prUrl(ref)) ?? []);
+/** The open PRs stacked with `head`: the repo's open-PR edges for the walk, the host's PR service for their states. */
+async function readStack(repo: string, head: string, force: boolean, follows: PrFollows): Promise<{ prs: Pr[]; stale: boolean }> {
+  const edges = await openEdges.get(repo, force).catch((error) => {
+    if (!quiet(error)) console.error(`[prs] ${repo} open PRs: ${message(error)}`);
+    return null;
+  });
+  if (!edges) return { prs: [], stale: true };
+  const refs = stackOf(head, edges).map((number) => ({ repo, number }));
+  if (!refs.length) return { prs: [], stale: false };
+  const read = await follows.prs(refs, "background");
+  return { prs: refs.flatMap((ref) => read.prs.get(prUrl(ref)) ?? []), stale: read.stale.size > 0 };
 }
 
 export interface PrDetails {
@@ -226,56 +176,6 @@ export interface PrDetails {
 export async function readPrDetails(cwd: string, url: string): Promise<PrDetails> {
   const json = JSON.parse(await gh.run(cwd, ["pr", "view", url, "--json", "number,title,url,body,baseRefName,headRefName"]));
   return { body: null, baseRefName: null, headRefName: null, ...json };
-}
-
-/** Which branch the checkout is on and what it tracks, from git alone. */
-export async function readCheckout(cwd: string): Promise<string> {
-  const [branch, upstream] = await Promise.all([
-    git(cwd, "symbolic-ref", "--quiet", "--short", "HEAD").catch(() => ""),
-    git(cwd, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}").catch(() => ""),
-  ]);
-  return `${branch} ${upstream}`;
-}
-
-/**
- * Reads per working directory, shared by every client and agent in it, at most once per TTL unless forced. A branch whose
- * PRs are all merged or closed, with no stack, keeps for TERMINAL_TTL_MS while the checkout stays on it. A failed read
- * serves the previous one, marked stale.
- */
-export class BranchCache {
-  private readonly entries = new Map<string, { at: number; ttl: number; checkout: Promise<string>; value: Promise<Branch> }>();
-
-  constructor(
-    private readonly read: (cwd: string, force: boolean) => Promise<Branch>,
-    private readonly now: () => number = Date.now,
-    private readonly checkout: (cwd: string) => Promise<string> = readCheckout,
-  ) {}
-
-  async get(cwd: string, force = false): Promise<Branch> {
-    const hit = this.entries.get(cwd);
-    if (hit && !force) {
-      const age = this.now() - hit.at;
-      if (age < TTL_MS) return hit.value;
-      // Past the short TTL only a merged branch's snapshot is left, and it only holds while git is still on that branch.
-      if (age < hit.ttl && (await hit.checkout) === (await this.checkout(cwd))) return hit.value;
-      // Another read replaced the entry while git answered.
-      const current = this.entries.get(cwd);
-      if (current && current !== hit) return current.value;
-    }
-    const entry = { at: this.now(), ttl: TTL_MS, checkout: this.checkout(cwd), value: Promise.resolve(noBranch(cwd)) };
-    entry.value = this.read(cwd, force).then(
-      (branch) => {
-        if (branch.prs.length && !branch.stack.length && branch.prs.every(terminal)) entry.ttl = TERMINAL_TTL_MS;
-        return branch;
-      },
-      (error) => {
-        if (!quiet(error)) console.error(`[prs] ${cwd}: ${message(error)}`);
-        return (hit?.value ?? Promise.resolve(noBranch(cwd))).then((previous): Branch => ({ ...previous, stale: true }));
-      },
-    );
-    this.entries.set(cwd, entry);
-    return entry.value;
-  }
 }
 
 /** Reads PR state by reference, whatever their repos; a PR the host couldn't read is left out. */
@@ -297,26 +197,6 @@ export class PrReadsPaused extends Error {
 /** Expected while GitHub or the host can't be read; the caches serve what they have without logging each read. */
 const quiet = (error: unknown) =>
   error instanceof RateLimited || error instanceof PrReadsUnavailable || error instanceof PrReadsPaused;
-
-const REVIEWS: Record<string, Pr["review"]> = {
-  approved: "approved",
-  changes_requested: "changes_requested",
-  review_required: "review_required",
-};
-
-/** The host's read in the plugin's `Pr` shape. */
-export function prOf(read: Extract<HostChangeRequestRead, { ok: true }>): Pr {
-  return {
-    number: read.number,
-    title: read.title,
-    url: read.url,
-    state: read.state === "merged" ? "MERGED" : read.state === "closed" ? "CLOSED" : "OPEN",
-    draft: read.isDraft,
-    checks: read.checksState,
-    failing: read.checks.filter((check) => check.state === "failing").length,
-    review: REVIEWS[read.reviewDecision ?? ""] ?? "none",
-  };
-}
 
 /**
  * PR state from the host (`paseo.changeRequests.read`), which reads every plugin's PRs through one batched reader with
@@ -353,79 +233,5 @@ export function hostPrFetcher(paseo: () => PaseoApi | null): PrFetcher {
     return prs;
   };
 }
-
-/**
- * Reads asked for within `windowMs` of each other go to `fetch` as one: a `listPrs` call refreshes every checkout at once,
- * and each checkout's branch, stack and linked PRs would otherwise be a host read (a GraphQL query) each.
- */
-export function coalescingFetcher(fetch: PrFetcher, windowMs = 10): PrFetcher {
-  let open: { refs: Map<string, PrRef>; result: Promise<Map<string, Pr>> } | null = null;
-  return (refs) => {
-    if (!refs.length) return Promise.resolve(new Map());
-    if (!open) {
-      const batch: { refs: Map<string, PrRef>; result: Promise<Map<string, Pr>> } = { refs: new Map(), result: Promise.resolve(new Map()) };
-      batch.result = new Promise((resolve, reject) => {
-        setTimeout(() => {
-          if (open === batch) open = null;
-          fetch([...batch.refs.values()]).then(resolve, reject);
-        }, windowMs);
-      });
-      open = batch;
-    }
-    for (const ref of refs) open.refs.set(prUrl(ref), ref);
-    return open.result;
-  };
-}
-
-/** Linked PR states by URL, at most once per TTL each (TERMINAL_TTL_MS once closed, never again once merged); a read fetches only what is missing or stale. */
-export class PrCache {
-  private readonly entries = new Map<string, { at: number; pr: Pr }>();
-  /** URLs whose last fetch failed: what we serve for them is the last answer, or unavailable. */
-  private readonly failed = new Set<string>();
-
-  constructor(private readonly fetch: PrFetcher, private readonly now: () => number = Date.now) {}
-
-  /** True when GitHub couldn't be read for `ref` the last time it was due. */
-  isStale(ref: PrRef): boolean {
-    return this.failed.has(prUrl(ref));
-  }
-
-  async get(refs: readonly PrRef[], force = false): Promise<Map<string, Pr>> {
-    const stale = refs.filter((ref) => {
-      const hit = this.entries.get(prUrl(ref));
-      // A merged PR can't change state; refetching it, even on the forced refresh after every turn, only
-      // spends rate limit. Track workspaces link dozens of them. Closed PRs can reopen, so they still expire.
-      if (hit?.pr.state === "MERGED") return false;
-      return force || !hit || this.now() - hit.at >= (terminal(hit.pr) ? TERMINAL_TTL_MS : TTL_MS);
-    });
-    if (stale.length) {
-      // The host batches and rate-limits the read; a failed read keeps what we had.
-      const fetched = await this.fetch(stale).catch((error) => {
-        if (!quiet(error)) console.error(`[prs] linked PRs: ${message(error)}`);
-        return null;
-      });
-      // A PR the host did not return shows as unavailable.
-      if (fetched) {
-        const at = this.now();
-        for (const ref of stale) {
-          this.entries.set(prUrl(ref), { at, pr: fetched.get(prUrl(ref)) ?? unavailable(ref) });
-          this.failed.delete(prUrl(ref));
-        }
-      } else for (const ref of stale) this.failed.add(prUrl(ref));
-    }
-    return new Map(refs.map((ref) => [prUrl(ref), this.entries.get(prUrl(ref))?.pr ?? unavailable(ref)]));
-  }
-}
-
-const unavailable = (ref: PrRef): Pr => ({
-  number: ref.number,
-  title: `${ref.repo}#${ref.number}`,
-  url: prUrl(ref),
-  state: "UNKNOWN",
-  draft: false,
-  checks: "none",
-  failing: 0,
-  review: "none",
-});
 
 const message = (error: unknown) => (error instanceof Error ? error.message : String(error));
