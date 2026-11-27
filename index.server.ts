@@ -3,7 +3,7 @@ import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { AutoLinker } from "./server/autolink";
 import { installBridge } from "./server/bridge";
 import { forkIntoPr } from "./server/fork";
-import { BranchCache, branchReader, hostPrFetcher, PrCache, readPrDetails } from "./server/github";
+import { BranchCache, branchReader, coalescingFetcher, hostPrFetcher, PrCache, readPrDetails } from "./server/github";
 import { Links, type WorkspaceRef } from "./server/links";
 import { listen } from "./server/listener";
 import { Reports, ReportStore } from "./server/reports";
@@ -17,7 +17,7 @@ export default function contribute(server: PluginServerContext) {
   // The daemon session behind `paseo` lives as long as this subprocess; any hook or handler hands it over.
   let paseo: PaseoApi | null = null;
   // PR state comes from the host; gh only finds which PRs a branch and its stack have.
-  const fetchPrs = hostPrFetcher(() => paseo);
+  const fetchPrs = coalescingFetcher(hostPrFetcher(() => paseo));
   const branches = new BranchCache(branchReader(fetchPrs));
   const links = new Links(new LinkStore(dir), new PrCache(fetchPrs));
   const capture = (api: PaseoApi) => {
