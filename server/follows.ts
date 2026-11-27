@@ -72,7 +72,8 @@ export class PrFollows {
   /** The PRs whose head is `headRef` in `repo` (`owner/name`), newest first. */
   async branch(repo: string, headRef: string): Promise<{ prs: Pr[]; stale: boolean }> {
     const entry = await this.follow(`branch:${repo.toLowerCase()}\0${headRef}`, {
-      branches: [{ repo: `https://github.com/${repo}`, headRef }],
+      // Closed too: with no open PR the pill shows the branch's latest merged or closed one (`visiblePrs`).
+      branches: [{ repo: `https://github.com/${repo}`, headRef, includeClosed: true }],
       // The workspace's own PRs: shown on its pill whenever the agent is.
       priority: "visible",
     });

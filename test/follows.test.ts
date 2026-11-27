@@ -61,7 +61,7 @@ describe("PrFollows", () => {
       [1, "CLOSED"],
     ]);
     expect(branch.stale).toBe(false);
-    expect(host.subscriptions[0]?.target).toEqual({ branches: [{ repo: "https://github.com/o/r", headRef: "feat/x" }], priority: "visible" });
+    expect(host.subscriptions[0]?.target).toEqual({ branches: [{ repo: "https://github.com/o/r", headRef: "feat/x", includeClosed: true }], priority: "visible" });
   });
 
   it("unsubscribes what no client asked about for a while", async () => {
